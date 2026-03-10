@@ -3,10 +3,12 @@ import aiohttp
 import logging
 from config import ai_model
 
-async def fetch_eth_news():
+async def fetch_news(symbol="ETH"):
+    tags = {"ETH": "ethereum", "BTC": "bitcoin"}
+    tag = tags.get(symbol, "cryptocurrency")
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get('https://cointelegraph.com/rss/tag/ethereum', timeout=5) as response:
+            async with session.get(f'https://cointelegraph.com/rss/tag/{tag}', timeout=5) as response:
                 xml_data = await response.text()
                 root = ET.fromstring(xml_data)
                 news = [f"- {item.find('title').text}" for item in root.findall('./channel/item')[:5]]
@@ -25,27 +27,27 @@ async def fetch_fear_and_greed():
         logging.error(f"Ошибка получения Fear & Greed: {e}")
         return "Неизвестно"
 
-async def get_ai_forecast(price, daily_low, daily_high, rsi_1d, buy_pct, sell_pct, macd_hist, btc_macd_hist, fng_index, news):
+async def get_ai_forecast(symbol, price, daily_low, daily_high, rsi_1d, buy_pct, sell_pct, macd_hist, guide_macd_hist, guide_name, fng_index, news):
     prompt = f"""
-    Твоя задача — провести системный анализ вероятностей для ETH/USDT. Ты — строгий риск-менеджер. Твой клиент торгует внутри дня (intraday) и держит сделки не более 1-3 дней. Приоритет — сохранение капитала.
+    Твоя задача — провести системный анализ вероятностей для {symbol}/USDT. Ты — строгий риск-менеджер. Твой клиент торгует внутри дня (intraday) и держит сделки не более 1-3 дней. Приоритет — сохранение капитала.
     
     ДАННЫЕ РЫНКА:
-    - Цена ETH: {price:.2f}
+    - Цена {symbol}: {price:.2f}
     - Дневной ATR коридор: Поддержка {daily_low:.2f}, Сопротивление {daily_high:.2f}
     - RSI (1D): {rsi_1d:.1f}
     - Давление стакана (50 уровней): Покупки {buy_pct:.0f}%, Продажи {sell_pct:.0f}%
-    - Локальный тренд ETH (MACD 4H): {'Восходящий (Бычий)' if macd_hist > 0 else 'Нисходящий (Медвежий)'}
-    - Вектор BTC (Поводырь 4H): {'Растет' if btc_macd_hist > 0 else 'Падает'}
+    - Локальный тренд {symbol} (MACD 4H): {'Восходящий (Бычий)' if macd_hist > 0 else 'Нисходящий (Медвежий)'}
+    - Вектор {guide_name} (Поводырь 4H): {'Растет' if guide_macd_hist > 0 else 'Падает'}
     - Индекс страха и жадности рынка: {fng_index}
     
-    СВЕЖИЕ НОВОСТИ:
+    СВЕЖИЕ НОВОСТИ ({symbol}):
     {news}
     
     ИНСТРУКЦИЯ (Chain of Thought):
     Проанализируй данные шаг за шагом, рассуждая вслух (очень кратко и емко):
     1. Техническая структура: Оцени запас хода цены до границ коридора и перегретость.
     2. Анализ ликвидности: Кто контролирует стакан? Есть ли аномалии?
-    3. Межрыночный анализ: Подтверждает ли вектор BTC локальный тренд ETH, или есть раскорреляция?
+    3. Межрыночный анализ: Подтверждает ли вектор {guide_name} локальный тренд {symbol}, или есть раскорреляция?
     4. Мета-анализ фона: Сопоставь новости и Индекс страха. Оправдан ли текущий тренд?
     
     СИНТЕЗ И ВЕРДИКТ (Выведи в конце строгим списком):

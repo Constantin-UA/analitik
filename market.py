@@ -6,7 +6,13 @@ import pandas_ta as ta
 import mplfinance as mpf
 import logging
 
-async def get_market_data(symbol_spot="ETH/USDT", symbol_perp="ETH/USDT:USDT", period=14):
+async def get_market_data(symbol="ETH", period=14):
+    symbol_spot = f"{symbol}/USDT"
+    symbol_perp = f"{symbol}/USDT:USDT"
+    # Динамический выбор поводыря: если смотрим BTC, то поводырь ETH
+    guide_name = "BTC" if symbol != "BTC" else "ETH"
+    guide_symbol = f"{guide_name}/USDT"
+
     exchange = ccxt.bybit({'enableRateLimit': True})
     try:
         ticker = await exchange.fetch_ticker(symbol_spot)
@@ -26,10 +32,10 @@ async def get_market_data(symbol_spot="ETH/USDT", symbol_perp="ETH/USDT:USDT", p
         macd_indicator = df_4h.ta.macd(append=True)
         macd_hist = macd_indicator.iloc[-1, 1]
 
-        ohlcv_btc_4h = await exchange.fetch_ohlcv("BTC/USDT", timeframe='4h', limit=50)
-        df_btc = pd.DataFrame(ohlcv_btc_4h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        macd_btc = df_btc.ta.macd(append=True)
-        btc_macd_hist = macd_btc.iloc[-1, 1]
+        ohlcv_guide_4h = await exchange.fetch_ohlcv(guide_symbol, timeframe='4h', limit=50)
+        df_guide = pd.DataFrame(ohlcv_guide_4h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        macd_guide = df_guide.ta.macd(append=True)
+        guide_macd_hist = macd_guide.iloc[-1, 1]
 
         ohlcv_1d = await exchange.fetch_ohlcv(symbol_spot, timeframe='1d', limit=60)
         df_1d = pd.DataFrame(ohlcv_1d, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -61,19 +67,19 @@ async def get_market_data(symbol_spot="ETH/USDT", symbol_perp="ETH/USDT:USDT", p
 
         await exchange.close()
         return (current_price, daily_atr, weekly_atr, daily_rsi, funding_rate, df_1d, 
-                buy_pressure, sell_pressure, macd_hist, total_days_in_month, green_days, green_days_pct, btc_macd_hist)
+                buy_pressure, sell_pressure, macd_hist, total_days_in_month, green_days, green_days_pct, guide_macd_hist, guide_name)
     except Exception as e:
         await exchange.close()
         logging.error(f"Ошибка API: {e}")
-        return (None,) * 13
+        return (None,) * 14
 
-def create_chart(df, current_price, daily_high, daily_low, filename="chart.png"):
+def create_chart(df, current_price, daily_high, daily_low, symbol="ETH", filename="chart.png"):
     df_plot = df.tail(45)
     buf = io.BytesIO()
     mpf.plot(
         df_plot, type='candle', style='charles', 
         hlines=dict(hlines=[daily_high, daily_low, current_price], colors=['r', 'g', 'b'], linestyle='--', alpha=0.6),
-        title='\nETH/USDT Daily (Bybit)', ylabel='Price', volume=True, ylabel_lower='Volume',
+        title=f'\n{symbol}/USDT Daily (Bybit)', ylabel='Price', volume=True, ylabel_lower='Volume',
         savefig=dict(fname=buf, dpi=120, bbox_inches='tight', format='png')
     )
     buf.seek(0)
