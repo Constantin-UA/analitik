@@ -1,9 +1,9 @@
 aiogram==3.17.0
-ccxt==4.4.45
-pandas==2.2.3
+ccxt
+pandas
 pandas-ta
 mplfinance
-google-generativeai==0.8.4
-aiohttp==3.11.12
-python-dotenv==1.0.1
-apscheduler==3.11.0
+google-generativeai
+aiohttp
+python-dotenv
+apscheduler
