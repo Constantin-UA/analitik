@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+from aiogram.exceptions import TelegramBadRequest
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, ReplyKeyboardMarkup, KeyboardButton
@@ -69,9 +70,27 @@ async def ai_forecast_handler(message: types.Message):
     price, atr_1d, _, rsi_1d, _, _, buy_pct, sell_pct, macd_hist, _, _, _, btc_macd_hist = data
     ai_text = await get_ai_forecast(price, price - atr_1d, price + atr_1d, rsi_1d, buy_pct, sell_pct, macd_hist, btc_macd_hist, fng_index, news)
     
-    await message.answer(f"🤖 **Анализ AI:**\n\n{ai_text}", parse_mode="Markdown")
-    await wait_msg.delete()
+    # --- ЛОВЦЫ ЛОВУШЕК (SAFEGUARDS) ---
+    # 1. Защита от переполнения (разбиваем на куски по 4000 символов)
+    max_len = 4000
+    chunks = [ai_text[i:i+max_len] for i in range(0, len(ai_text), max_len)]
 
+    for i, chunk in enumerate(chunks):
+        text_to_send = f"🤖 **Анализ AI:**\n\n{chunk}" if i == 0 else chunk
+        
+        # 2. Защита от сломанного Markdown
+        try:
+            await message.answer(text_to_send, parse_mode="Markdown")
+        except TelegramBadRequest as e:
+            if "parse entities" in str(e).lower() or "markdown" in str(e).lower():
+                logging.warning("⚠️ Ошибка Markdown, ИИ выдал неверные спецсимволы. Отправляю чистым текстом.")
+                await message.answer(text_to_send) # Отправка без форматирования
+            else:
+                logging.error(f"❌ Неизвестная ошибка Telegram API: {e}")
+                await message.answer("❌ Произошла системная ошибка при отправке сообщения.")
+
+    await wait_msg.delete()
+    
 @dp.message(Command("log"))
 @dp.message(F.text == "📝 Log")
 async def start_log(message: types.Message, state: FSMContext):
