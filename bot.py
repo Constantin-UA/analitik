@@ -53,7 +53,7 @@ async def ask_log(message: types.Message):
 
 @dp.callback_query(F.data.startswith("market_"))
 async def market_handler(call: CallbackQuery):
-    await call.answer() # Убирает часики загрузки с кнопки
+    await call.answer()
     symbol = call.data.split("_")[1]
     await call.message.edit_text(f"⏳ Собираю данные по {symbol}...")
     
@@ -105,8 +105,13 @@ async def ai_forecast_handler(call: CallbackQuery):
     daily_high = daily_open + atr_1d
     daily_low = daily_open - atr_1d
     
+    # --- МАТЕМАТИКА ПОЗИЦИИ В КОРИДОРЕ ---
+    channel_range = daily_high - daily_low
+    position_pct = ((price - daily_low) / channel_range * 100) if channel_range > 0 else 50
+    # -------------------------------------
+    
     ai_text = await get_ai_forecast(
-        symbol=symbol, price=price, daily_low=daily_low, daily_high=daily_high, 
+        symbol=symbol, price=price, daily_low=daily_low, daily_high=daily_high, position_pct=position_pct,
         rsi_1d=rsi_1d, macd_hist=macd_hist, guide_macd_hist=guide_macd_hist, 
         guide_name=guide_name, fng_index=fng_index, news=news, 
         funding_rate=funding, ema50=ema50, cur_vol=cur_vol, avg_vol=avg_vol
