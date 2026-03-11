@@ -1,17 +1,26 @@
 import io
 import datetime
+import asyncio
 import ccxt.async_support as ccxt
 import pandas as pd
 import pandas_ta as ta
 import mplfinance as mpf
+import yfinance as yf
 import logging
+
+def fetch_spy_macd_sync():
+    """Синхронная функция для загрузки S&P 500 (SPY) через Yahoo Finance"""
+    try:
+        df = yf.download("SPY", period="2mo", interval="1d", progress=False)
+        macd = df.ta.macd()
+        return macd.iloc[-1, 1] # Гистограмма MACD
+    except Exception as e:
+        logging.error(f"yfinance error: {e}")
+        return 0
 
 async def get_market_data(symbol="ETH", period=14):
     symbol_spot = f"{symbol}/USDT"
     symbol_perp = f"{symbol}/USDT:USDT"
-    # Динамический выбор поводыря: если смотрим BTC, то поводырь ETH
-    guide_name = "BTC" if symbol != "BTC" else "ETH"
-    guide_symbol = f"{guide_name}/USDT"
 
     exchange = ccxt.bybit({'enableRateLimit': True})
     try:
@@ -32,10 +41,18 @@ async def get_market_data(symbol="ETH", period=14):
         macd_indicator = df_4h.ta.macd(append=True)
         macd_hist = macd_indicator.iloc[-1, 1]
 
-        ohlcv_guide_4h = await exchange.fetch_ohlcv(guide_symbol, timeframe='4h', limit=50)
-        df_guide = pd.DataFrame(ohlcv_guide_4h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        macd_guide = df_guide.ta.macd(append=True)
-        guide_macd_hist = macd_guide.iloc[-1, 1]
+        # --- НОВАЯ ЛОГИКА ПОВОДЫРЯ ---
+        if symbol == "BTC":
+            guide_name = "S&P 500 (SPY)"
+            # Вызываем синхронный yfinance в отдельном потоке, чтобы не блокировать бота
+            guide_macd_hist = await asyncio.to_thread(fetch_spy_macd_sync)
+        else:
+            guide_name = "Биткоин (BTC)"
+            ohlcv_guide_4h = await exchange.fetch_ohlcv("BTC/USDT", timeframe='4h', limit=50)
+            df_guide = pd.DataFrame(ohlcv_guide_4h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            macd_guide = df_guide.ta.macd(append=True)
+            guide_macd_hist = macd_guide.iloc[-1, 1]
+        # -----------------------------
 
         ohlcv_1d = await exchange.fetch_ohlcv(symbol_spot, timeframe='1d', limit=60)
         df_1d = pd.DataFrame(ohlcv_1d, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
