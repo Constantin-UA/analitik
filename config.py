@@ -17,4 +17,4 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 genai.configure(api_key=GEMINI_API_KEY)
 # ИСПОЛЬЗУЕМ АКТУАЛЬНУЮ И СУЩЕСТВУЮЩУЮ МОДЕЛЬ
-ai_model = genai.GenerativeModel('gemini-2.0-flash')
+ai_model = genai.GenerativeModel('gemini-2.5-flash')
