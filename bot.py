@@ -61,7 +61,12 @@ async def market_handler(call: CallbackQuery):
         return await call.message.edit_text("❌ Ошибка получения данных.")
 
     price, atr_1d, atr_1w, rsi_1d, funding, df_1d, buy_pct, sell_pct, macd_hist, total_days, green_days, green_pct, guide_macd_hist, guide_name, ema50, cur_vol, avg_vol = data
-    daily_high, daily_low = price + atr_1d, price - atr_1d
+    
+    # --- СТАТИЧНЫЙ КОРИДОР ---
+    daily_open = df_1d['open'].iloc[-1]
+    daily_high = daily_open + atr_1d
+    daily_low = daily_open - atr_1d
+    # -------------------------
 
     chart_buffer = create_chart(df_1d, price, daily_high, daily_low, symbol)
     photo = BufferedInputFile(chart_buffer.getvalue(), filename="chart.png")
@@ -94,10 +99,16 @@ async def ai_forecast_handler(call: CallbackQuery):
     if data[0] is None:
         return await call.message.edit_text("❌ Ошибка данных.")
 
-    price, atr_1d, _, rsi_1d, funding, _, _, _, macd_hist, _, _, _, guide_macd_hist, guide_name, ema50, cur_vol, avg_vol = data
+    price, atr_1d, _, rsi_1d, funding, df_1d, _, _, macd_hist, _, _, _, guide_macd_hist, guide_name, ema50, cur_vol, avg_vol = data
+    
+    # --- СТАТИЧНЫЙ КОРИДОР ---
+    daily_open = df_1d['open'].iloc[-1]
+    daily_high = daily_open + atr_1d
+    daily_low = daily_open - atr_1d
+    # -------------------------
     
     ai_text = await get_ai_forecast(
-        symbol=symbol, price=price, daily_low=price - atr_1d, daily_high=price + atr_1d, 
+        symbol=symbol, price=price, daily_low=daily_low, daily_high=daily_high, 
         rsi_1d=rsi_1d, macd_hist=macd_hist, guide_macd_hist=guide_macd_hist, 
         guide_name=guide_name, fng_index=fng_index, news=news, 
         funding_rate=funding, ema50=ema50, cur_vol=cur_vol, avg_vol=avg_vol
@@ -143,7 +154,14 @@ async def save_log(message: types.Message, state: FSMContext):
     
     data = await get_market_data(symbol)
     price, atr_1d, _, rsi_1d, _, df_1d, _, _, macd_hist, _, _, _, _, _, _, _, _ = data
-    chart_buffer = create_chart(df_1d, price, price + atr_1d, price - atr_1d, symbol, "log_chart.png")
+    
+    # --- СТАТИЧНЫЙ КОРИДОР ---
+    daily_open = df_1d['open'].iloc[-1]
+    daily_high = daily_open + atr_1d
+    daily_low = daily_open - atr_1d
+    # -------------------------
+    
+    chart_buffer = create_chart(df_1d, price, daily_high, daily_low, symbol, "log_chart.png")
     photo = BufferedInputFile(chart_buffer.getvalue(), filename="log_chart.png")
 
     log_text = (
@@ -160,8 +178,14 @@ async def check_alerts():
     for symbol in ["ETH", "BTC"]:
         data = await get_market_data(symbol)
         if data[0] is None: continue
-        price, atr_1d, _, rsi_1d = data[0], data[1], data[2], data[3]
-        daily_high, daily_low = price + atr_1d, price - atr_1d
+        
+        price, atr_1d, rsi_1d, df_1d = data[0], data[1], data[3], data[5]
+        
+        # --- СТАТИЧНЫЙ КОРИДОР ДЛЯ АЛЕРТОВ ---
+        daily_open = df_1d['open'].iloc[-1]
+        daily_high = daily_open + atr_1d
+        daily_low = daily_open - atr_1d
+        # ------------------------------------
         
         alert_message, current_alert_type = None, None
 
@@ -178,6 +202,10 @@ async def check_alerts():
 async def main():
     scheduler.add_job(check_alerts, 'interval', minutes=15)
     scheduler.start()
+    
+    # Сбрасываем все накопившиеся запросы, если бот был оффлайн
+    await bot.delete_webhook(drop_pending_updates=True) 
+    
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
