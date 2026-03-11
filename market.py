@@ -13,7 +13,7 @@ def fetch_spy_macd_sync():
     try:
         df = yf.download("SPY", period="2mo", interval="1d", progress=False)
         macd = df.ta.macd()
-        return macd.iloc[-1, 1] # Гистограмма MACD
+        return macd.iloc[-1, 1] 
     except Exception as e:
         logging.error(f"yfinance error: {e}")
         return 0
@@ -41,10 +41,8 @@ async def get_market_data(symbol="ETH", period=14):
         macd_indicator = df_4h.ta.macd(append=True)
         macd_hist = macd_indicator.iloc[-1, 1]
 
-        # --- НОВАЯ ЛОГИКА ПОВОДЫРЯ ---
         if symbol == "BTC":
             guide_name = "S&P 500 (SPY)"
-            # Вызываем синхронный yfinance в отдельном потоке, чтобы не блокировать бота
             guide_macd_hist = await asyncio.to_thread(fetch_spy_macd_sync)
         else:
             guide_name = "Биткоин (BTC)"
@@ -52,9 +50,9 @@ async def get_market_data(symbol="ETH", period=14):
             df_guide = pd.DataFrame(ohlcv_guide_4h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             macd_guide = df_guide.ta.macd(append=True)
             guide_macd_hist = macd_guide.iloc[-1, 1]
-        # -----------------------------
 
-        ohlcv_1d = await exchange.fetch_ohlcv(symbol_spot, timeframe='1d', limit=60)
+        # Увеличен limit до 150 для корректного расчета EMA 50
+        ohlcv_1d = await exchange.fetch_ohlcv(symbol_spot, timeframe='1d', limit=150)
         df_1d = pd.DataFrame(ohlcv_1d, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df_1d['timestamp'] = pd.to_datetime(df_1d['timestamp'], unit='ms')
         df_1d['volume'] = pd.to_numeric(df_1d['volume'])
@@ -62,9 +60,15 @@ async def get_market_data(symbol="ETH", period=14):
         
         df_1d.ta.atr(length=period, append=True)
         df_1d.ta.rsi(length=period, append=True)
+        df_1d.ta.ema(length=50, append=True) # Глобальный тренд
         
         daily_atr = df_1d[f'ATRr_{period}'].iloc[-1]
         daily_rsi = df_1d[f'RSI_{period}'].iloc[-1]
+        daily_ema50 = df_1d['EMA_50'].iloc[-1]
+
+        # Расчет тренда объемов (Сравниваем текущий со средним за 10 дней)
+        current_volume = df_1d['volume'].iloc[-1]
+        avg_volume_10d = df_1d['volume'].rolling(10).mean().iloc[-1]
 
         current_date_utc = datetime.datetime.now(datetime.timezone.utc)
         current_month, current_year = current_date_utc.month, current_date_utc.year
@@ -83,12 +87,14 @@ async def get_market_data(symbol="ETH", period=14):
         weekly_atr = df_1w[f'ATRr_{period}'].iloc[-1]
 
         await exchange.close()
+        # Теперь функция возвращает 17 параметров
         return (current_price, daily_atr, weekly_atr, daily_rsi, funding_rate, df_1d, 
-                buy_pressure, sell_pressure, macd_hist, total_days_in_month, green_days, green_days_pct, guide_macd_hist, guide_name)
+                buy_pressure, sell_pressure, macd_hist, total_days_in_month, green_days, green_days_pct, 
+                guide_macd_hist, guide_name, daily_ema50, current_volume, avg_volume_10d)
     except Exception as e:
         await exchange.close()
         logging.error(f"Ошибка API: {e}")
-        return (None,) * 14
+        return (None,) * 17
 
 def create_chart(df, current_price, daily_high, daily_low, symbol="ETH", filename="chart.png"):
     df_plot = df.tail(45)
