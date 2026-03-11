@@ -11,7 +11,11 @@ import logging
 def fetch_spy_macd_sync():
     """Синхронная функция для загрузки S&P 500 (SPY) через Yahoo Finance"""
     try:
-        df = yf.download("SPY", period="2mo", interval="1d", progress=False)
+        # ИСПОЛЬЗУЕМ БЕЗОПАСНЫЙ МЕТОД HISTORY ВМЕСТО DOWNLOAD
+        spy = yf.Ticker("SPY")
+        df = spy.history(period="2mo", interval="1d")
+        if df.empty:
+            return 0
         macd = df.ta.macd()
         return macd.iloc[-1, 1] 
     except Exception as e:
@@ -51,7 +55,6 @@ async def get_market_data(symbol="ETH", period=14):
             macd_guide = df_guide.ta.macd(append=True)
             guide_macd_hist = macd_guide.iloc[-1, 1]
 
-        # Увеличен limit до 150 для корректного расчета EMA 50
         ohlcv_1d = await exchange.fetch_ohlcv(symbol_spot, timeframe='1d', limit=150)
         df_1d = pd.DataFrame(ohlcv_1d, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df_1d['timestamp'] = pd.to_datetime(df_1d['timestamp'], unit='ms')
@@ -66,7 +69,6 @@ async def get_market_data(symbol="ETH", period=14):
         daily_rsi = df_1d[f'RSI_{period}'].iloc[-1]
         daily_ema50 = df_1d['EMA_50'].iloc[-1]
 
-        # Расчет тренда объемов (Сравниваем текущий со средним за 10 дней)
         current_volume = df_1d['volume'].iloc[-1]
         avg_volume_10d = df_1d['volume'].rolling(10).mean().iloc[-1]
 
@@ -87,7 +89,6 @@ async def get_market_data(symbol="ETH", period=14):
         weekly_atr = df_1w[f'ATRr_{period}'].iloc[-1]
 
         await exchange.close()
-        # Теперь функция возвращает 17 параметров
         return (current_price, daily_atr, weekly_atr, daily_rsi, funding_rate, df_1d, 
                 buy_pressure, sell_pressure, macd_hist, total_days_in_month, green_days, green_days_pct, 
                 guide_macd_hist, guide_name, daily_ema50, current_volume, avg_volume_10d)

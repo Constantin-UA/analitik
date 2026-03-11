@@ -16,4 +16,5 @@ if not all([BOT_TOKEN, ADMIN_ID, LOG_CHANNEL_ID, GEMINI_API_KEY]):
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 genai.configure(api_key=GEMINI_API_KEY)
-ai_model = genai.GenerativeModel('gemini-2.5-flash')
+# ИСПОЛЬЗУЕМ АКТУАЛЬНУЮ И СУЩЕСТВУЮЩУЮ МОДЕЛЬ
+ai_model = genai.GenerativeModel('gemini-2.0-flash')

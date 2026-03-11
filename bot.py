@@ -53,6 +53,7 @@ async def ask_log(message: types.Message):
 
 @dp.callback_query(F.data.startswith("market_"))
 async def market_handler(call: CallbackQuery):
+    await call.answer() # Убирает часики загрузки с кнопки
     symbol = call.data.split("_")[1]
     await call.message.edit_text(f"⏳ Собираю данные по {symbol}...")
     
@@ -62,11 +63,9 @@ async def market_handler(call: CallbackQuery):
 
     price, atr_1d, atr_1w, rsi_1d, funding, df_1d, buy_pct, sell_pct, macd_hist, total_days, green_days, green_pct, guide_macd_hist, guide_name, ema50, cur_vol, avg_vol = data
     
-    # --- СТАТИЧНЫЙ КОРИДОР ---
     daily_open = df_1d['open'].iloc[-1]
     daily_high = daily_open + atr_1d
     daily_low = daily_open - atr_1d
-    # -------------------------
 
     chart_buffer = create_chart(df_1d, price, daily_high, daily_low, symbol)
     photo = BufferedInputFile(chart_buffer.getvalue(), filename="chart.png")
@@ -89,6 +88,7 @@ async def market_handler(call: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("ai_"))
 async def ai_forecast_handler(call: CallbackQuery):
+    await call.answer()
     symbol = call.data.split("_")[1]
     await call.message.edit_text(f"🧠 Запускаю ИИ для {symbol}...")
     
@@ -101,11 +101,9 @@ async def ai_forecast_handler(call: CallbackQuery):
 
     price, atr_1d, _, rsi_1d, funding, df_1d, _, _, macd_hist, _, _, _, guide_macd_hist, guide_name, ema50, cur_vol, avg_vol = data
     
-    # --- СТАТИЧНЫЙ КОРИДОР ---
     daily_open = df_1d['open'].iloc[-1]
     daily_high = daily_open + atr_1d
     daily_low = daily_open - atr_1d
-    # -------------------------
     
     ai_text = await get_ai_forecast(
         symbol=symbol, price=price, daily_low=daily_low, daily_high=daily_high, 
@@ -132,6 +130,7 @@ async def ai_forecast_handler(call: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("log_"))
 async def start_log_process(call: CallbackQuery, state: FSMContext):
+    await call.answer()
     symbol = call.data.split("_")[1]
     await state.update_data(symbol=symbol) 
     await state.set_state(LogState.waiting_for_note)
@@ -155,11 +154,9 @@ async def save_log(message: types.Message, state: FSMContext):
     data = await get_market_data(symbol)
     price, atr_1d, _, rsi_1d, _, df_1d, _, _, macd_hist, _, _, _, _, _, _, _, _ = data
     
-    # --- СТАТИЧНЫЙ КОРИДОР ---
     daily_open = df_1d['open'].iloc[-1]
     daily_high = daily_open + atr_1d
     daily_low = daily_open - atr_1d
-    # -------------------------
     
     chart_buffer = create_chart(df_1d, price, daily_high, daily_low, symbol, "log_chart.png")
     photo = BufferedInputFile(chart_buffer.getvalue(), filename="log_chart.png")
@@ -181,11 +178,9 @@ async def check_alerts():
         
         price, atr_1d, rsi_1d, df_1d = data[0], data[1], data[3], data[5]
         
-        # --- СТАТИЧНЫЙ КОРИДОР ДЛЯ АЛЕРТОВ ---
         daily_open = df_1d['open'].iloc[-1]
         daily_high = daily_open + atr_1d
         daily_low = daily_open - atr_1d
-        # ------------------------------------
         
         alert_message, current_alert_type = None, None
 
@@ -203,7 +198,6 @@ async def main():
     scheduler.add_job(check_alerts, 'interval', minutes=15)
     scheduler.start()
     
-    # Сбрасываем все накопившиеся запросы, если бот был оффлайн
     await bot.delete_webhook(drop_pending_updates=True) 
     
     await dp.start_polling(bot)
