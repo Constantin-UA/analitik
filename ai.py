@@ -4,7 +4,8 @@ import logging
 from config import ai_model
 
 async def fetch_news(symbol: str = "ETH") -> str:
-    tags = {"ETH": "ethereum", "BTC": "bitcoin"}
+    # Добавляем тег SOL для таргетированного поиска новостей
+    tags = {"ETH": "ethereum", "BTC": "bitcoin", "SOL": "solana"} 
     tag = tags.get(symbol, "cryptocurrency")
     try:
         async with aiohttp.ClientSession() as session:

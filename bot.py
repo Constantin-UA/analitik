@@ -31,7 +31,8 @@ def get_asset_keyboard(action_prefix):
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="ETH", callback_data=f"{action_prefix}_ETH"),
-            InlineKeyboardButton(text="BTC", callback_data=f"{action_prefix}_BTC")
+            InlineKeyboardButton(text="BTC", callback_data=f"{action_prefix}_BTC"),
+            InlineKeyboardButton(text="SOL", callback_data=f"{action_prefix}_SOL") # Добавлена кнопка SOL
         ]
     ])
 
@@ -180,7 +181,8 @@ async def save_log(message: types.Message, state: FSMContext):
     await wait_msg.delete()
 
 async def check_alerts():
-    for symbol in ["ETH", "BTC"]:
+    # Добавляем SOL в список сканирования радара
+    for symbol in ["ETH", "BTC", "SOL"]: 
         data = await get_market_data(symbol)
         if data[0] is None: continue
         
@@ -201,7 +203,7 @@ async def check_alerts():
         if alert_message and current_alert_type != alert_state.get(f"last_{symbol}"):
             await bot.send_message(chat_id=ADMIN_ID, text=alert_message)
             alert_state[f"last_{symbol}"] = current_alert_type
-
+            
 async def main():
     scheduler.add_job(check_alerts, 'interval', minutes=15)
     scheduler.start()
