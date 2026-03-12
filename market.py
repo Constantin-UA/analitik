@@ -8,21 +8,20 @@ import mplfinance as mpf
 import yfinance as yf
 import logging
 
-def fetch_spy_macd_sync():
-    """Синхронная функция для загрузки S&P 500 (SPY) через Yahoo Finance"""
+def fetch_spy_macd_sync() -> float:
+    """Чому синхронно: yfinance не підтримує async з коробки, ізолюємо блокуючий виклик."""
     try:
-        # ИСПОЛЬЗУЕМ БЕЗОПАСНЫЙ МЕТОД HISTORY ВМЕСТО DOWNLOAD
         spy = yf.Ticker("SPY")
         df = spy.history(period="2mo", interval="1d")
         if df.empty:
-            return 0
+            return 0.0
         macd = df.ta.macd()
-        return macd.iloc[-1, 1] 
+        return float(macd.iloc[-1, 1]) 
     except Exception as e:
         logging.error(f"yfinance error: {e}")
-        return 0
+        return 0.0
 
-async def get_market_data(symbol="ETH", period=14):
+async def get_market_data(symbol: str = "ETH", period: int = 14) -> tuple:
     symbol_spot = f"{symbol}/USDT"
     symbol_perp = f"{symbol}/USDT:USDT"
 
@@ -43,7 +42,7 @@ async def get_market_data(symbol="ETH", period=14):
         ohlcv_4h = await exchange.fetch_ohlcv(symbol_spot, timeframe='4h', limit=50)
         df_4h = pd.DataFrame(ohlcv_4h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         macd_indicator = df_4h.ta.macd(append=True)
-        macd_hist = macd_indicator.iloc[-1, 1]
+        macd_hist = float(macd_indicator.iloc[-1, 1])
 
         if symbol == "BTC":
             guide_name = "S&P 500 (SPY)"
@@ -53,7 +52,7 @@ async def get_market_data(symbol="ETH", period=14):
             ohlcv_guide_4h = await exchange.fetch_ohlcv("BTC/USDT", timeframe='4h', limit=50)
             df_guide = pd.DataFrame(ohlcv_guide_4h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             macd_guide = df_guide.ta.macd(append=True)
-            guide_macd_hist = macd_guide.iloc[-1, 1]
+            guide_macd_hist = float(macd_guide.iloc[-1, 1])
 
         ohlcv_1d = await exchange.fetch_ohlcv(symbol_spot, timeframe='1d', limit=150)
         df_1d = pd.DataFrame(ohlcv_1d, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -63,14 +62,30 @@ async def get_market_data(symbol="ETH", period=14):
         
         df_1d.ta.atr(length=period, append=True)
         df_1d.ta.rsi(length=period, append=True)
-        df_1d.ta.ema(length=50, append=True) # Глобальный тренд
+        df_1d.ta.ema(length=50, append=True) 
         
-        daily_atr = df_1d[f'ATRr_{period}'].iloc[-1]
-        daily_rsi = df_1d[f'RSI_{period}'].iloc[-1]
-        daily_ema50 = df_1d['EMA_50'].iloc[-1]
+        daily_atr = float(df_1d[f'ATRr_{period}'].iloc[-1])
+        daily_rsi = float(df_1d[f'RSI_{period}'].iloc[-1])
+        daily_ema50 = float(df_1d['EMA_50'].iloc[-1])
 
-        current_volume = df_1d['volume'].iloc[-1]
-        avg_volume_10d = df_1d['volume'].rolling(10).mean().iloc[-1]
+        current_volume = float(df_1d['volume'].iloc[-1])
+        avg_volume_10d = float(df_1d['volume'].rolling(10).mean().iloc[-1])
+
+        # --- НОВИЙ БЛОК: КЛАСТЕРИ ТА ФІБОНАЧЧІ ---
+        # Чому 30 днів: оптимальний горизонт свінг-трейдингу, що відсікає застарілу ліквідність.
+        recent_30d = df_1d.tail(30)
+        recent_high = float(recent_30d['high'].max())
+        recent_low = float(recent_30d['low'].min())
+        
+        # Чому 0.618: Золотий перетин найчастіше виступає зоною завершення корекції алгоритмічних ботів.
+        fibo_618 = recent_high - (recent_high - recent_low) * 0.618
+        
+        # Чому pd.cut: Апроксимація об'ємного профілю (VPVR) через розбиття діапазону на 20 кластерів.
+        bins = pd.cut(recent_30d['close'], bins=20)
+        volume_by_price = recent_30d.groupby(bins, observed=False)['volume'].sum()
+        poc_bin = volume_by_price.idxmax()
+        poc_price = float(poc_bin.mid)
+        # ----------------------------------------
 
         current_date_utc = datetime.datetime.now(datetime.timezone.utc)
         current_month, current_year = current_date_utc.month, current_date_utc.year
@@ -83,19 +98,14 @@ async def get_market_data(symbol="ETH", period=14):
         else:
             total_days_in_month, green_days, green_days_pct = 0, 0, 0
 
-        ohlcv_1w = await exchange.fetch_ohlcv(symbol_spot, timeframe='1w', limit=30)
-        df_1w = pd.DataFrame(ohlcv_1w, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df_1w.ta.atr(length=period, append=True)
-        weekly_atr = df_1w[f'ATRr_{period}'].iloc[-1]
-
         await exchange.close()
-        return (current_price, daily_atr, weekly_atr, daily_rsi, funding_rate, df_1d, 
-                buy_pressure, sell_pressure, macd_hist, total_days_in_month, green_days, green_days_pct, 
-                guide_macd_hist, guide_name, daily_ema50, current_volume, avg_volume_10d)
+        return (current_price, daily_atr, daily_rsi, funding_rate, df_1d, 
+                buy_pressure, sell_pressure, macd_hist, guide_macd_hist, guide_name, 
+                daily_ema50, current_volume, avg_volume_10d, poc_price, fibo_618)
     except Exception as e:
         await exchange.close()
         logging.error(f"Ошибка API: {e}")
-        return (None,) * 17
+        return (None,) * 15
 
 def create_chart(df, current_price, daily_high, daily_low, symbol="ETH", filename="chart.png"):
     df_plot = df.tail(45)
