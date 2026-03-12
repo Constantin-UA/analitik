@@ -8,7 +8,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.exceptions import TelegramBadRequest
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from config import BOT_TOKEN, ADMIN_ID, LOG_CHANNEL_ID, logging
+from config import BOT_TOKEN, ADMIN_ID, LOG_CHANNEL_ID, logging, TRADE_DEPOSIT, TRADE_RISK_PCT
 from market import get_market_data, create_chart
 from ai import fetch_news, fetch_fear_and_greed, get_ai_forecast
 
@@ -107,12 +107,30 @@ async def ai_forecast_handler(call: CallbackQuery):
     channel_range = daily_high - daily_low
     position_pct = ((price - daily_low) / channel_range * 100) if channel_range > 0 else 50
     
+    # --- МАТЕМАТИКА РИЗИК-МЕНЕДЖМЕНТУ (Position Sizing) ---
+    risk_usd = TRADE_DEPOSIT * (TRADE_RISK_PCT / 100)
+    
+    # Сценарій для ЛОНГу (Stop-Loss на 0.2% нижче підтримки ATR)
+    long_sl = daily_low * 0.998
+    long_risk_per_coin = price - long_sl
+    long_amount = risk_usd / long_risk_per_coin if long_risk_per_coin > 0 else 0
+    long_tp = daily_high # Ціль - верхня межа коридору
+    
+    # Сценарій для ШОРТу (Stop-Loss на 0.2% вище опору ATR)
+    short_sl = daily_high * 1.002
+    short_risk_per_coin = short_sl - price
+    short_amount = risk_usd / short_risk_per_coin if short_risk_per_coin > 0 else 0
+    short_tp = daily_low # Ціль - нижня межа коридору
+    # --------------------------------------------------------
+    
     ai_text = await get_ai_forecast(
         symbol=symbol, price=price, daily_low=daily_low, daily_high=daily_high, position_pct=position_pct,
         rsi_1d=rsi_1d, macd_hist=macd_hist, guide_macd_hist=guide_macd_hist, 
         guide_name=guide_name, fng_index=fng_index, news=news, 
         funding_rate=funding, ema50=ema50, cur_vol=cur_vol, avg_vol=avg_vol,
-        poc_price=poc_price, fibo_618=fibo_618
+        poc_price=poc_price, fibo_618=fibo_618,
+        risk_usd=risk_usd, long_sl=long_sl, long_amount=long_amount, long_tp=long_tp,
+        short_sl=short_sl, short_amount=short_amount, short_tp=short_tp
     )
     
     await call.message.delete()
