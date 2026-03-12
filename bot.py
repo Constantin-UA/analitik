@@ -28,11 +28,17 @@ main_keyboard = ReplyKeyboardMarkup(
 )
 
 def get_asset_keyboard(action_prefix):
+    # Разбиваем кнопки на два элегантных ряда для удобства в Telegram
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="ETH", callback_data=f"{action_prefix}_ETH"),
             InlineKeyboardButton(text="BTC", callback_data=f"{action_prefix}_BTC"),
-            InlineKeyboardButton(text="SOL", callback_data=f"{action_prefix}_SOL") # Добавлена кнопка SOL
+            InlineKeyboardButton(text="ETH", callback_data=f"{action_prefix}_ETH"),
+            InlineKeyboardButton(text="SOL", callback_data=f"{action_prefix}_SOL")
+        ],
+        [
+            InlineKeyboardButton(text="BNB", callback_data=f"{action_prefix}_BNB"),
+            InlineKeyboardButton(text="XRP", callback_data=f"{action_prefix}_XRP"),
+            InlineKeyboardButton(text="ADA", callback_data=f"{action_prefix}_ADA")
         ]
     ])
 
@@ -181,11 +187,12 @@ async def save_log(message: types.Message, state: FSMContext):
     await wait_msg.delete()
 
 async def check_alerts():
-    # Добавляем SOL в список сканирования радара
-    for symbol in ["ETH", "BTC", "SOL"]: 
+    # Расширяем список сканирования до 6 фундаментальных активов
+    for symbol in ["BTC", "ETH", "SOL", "BNB", "XRP", "ADA"]: 
         data = await get_market_data(symbol)
         if data[0] is None: continue
         
+        # ... остальная логика радара остается без изменений ...
         price, atr_1d, rsi_1d, df_1d = data[0], data[1], data[2], data[4]
         
         daily_open = df_1d['open'].iloc[-1]

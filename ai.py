@@ -4,9 +4,17 @@ import logging
 from config import ai_model
 
 async def fetch_news(symbol: str = "ETH") -> str:
-    # Добавляем тег SOL для таргетированного поиска новостей
-    tags = {"ETH": "ethereum", "BTC": "bitcoin", "SOL": "solana"} 
+    # Добавляем теги для новых активов
+    tags = {
+        "BTC": "bitcoin", 
+        "ETH": "ethereum", 
+        "SOL": "solana",
+        "BNB": "binance-coin",
+        "XRP": "ripple",
+        "ADA": "cardano"
+    } 
     tag = tags.get(symbol, "cryptocurrency")
+    
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(f'https://cointelegraph.com/rss/tag/{tag}', timeout=5) as response:
