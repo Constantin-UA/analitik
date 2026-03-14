@@ -12,8 +12,13 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # --- НАЛАШТУВАННЯ РИЗИК-МЕНЕДЖМЕНТУ ---
 TRADE_DEPOSIT = float(os.getenv("TRADE_DEPOSIT", 1000)) # Ваш депозит у доларах
-TRADE_RISK_PCT = float(os.getenv("TRADE_RISK_PCT", 10))  # Ризик на угоду у відсотках (1%)
+TRADE_RISK_PCT = float(os.getenv("TRADE_RISK_PCT", 10))  # Ризик на угоду у відсотках
 # ---------------------------------------
+
+# --- НОВИЙ БЛОК: Ізоляція списку активів для Свінг-бота ---
+SWING_WATCHLIST_RAW = os.getenv("SWING_WATCHLIST", "BTC,ETH,SOL,BNB,XRP")
+SWING_WATCHLIST = [coin.strip() for coin in SWING_WATCHLIST_RAW.split(",")]
+# ----------------------------------------------------------
 
 if not all([BOT_TOKEN, ADMIN_ID, LOG_CHANNEL_ID, GEMINI_API_KEY]):
     raise ValueError("Відсутні токени в .env!")

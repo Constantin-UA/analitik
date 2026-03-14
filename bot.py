@@ -8,7 +8,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.exceptions import TelegramBadRequest
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from config import BOT_TOKEN, ADMIN_ID, LOG_CHANNEL_ID, logging, TRADE_DEPOSIT, TRADE_RISK_PCT
+from config import BOT_TOKEN, ADMIN_ID, LOG_CHANNEL_ID, logging, TRADE_DEPOSIT, TRADE_RISK_PCT, SWING_WATCHLIST
 from market import get_market_data, create_chart
 from ai import fetch_news, fetch_fear_and_greed, get_ai_forecast
 
@@ -28,19 +28,10 @@ main_keyboard = ReplyKeyboardMarkup(
 )
 
 def get_asset_keyboard(action_prefix):
-    # Разбиваем кнопки на два элегантных ряда для удобства в Telegram
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="BTC", callback_data=f"{action_prefix}_BTC"),
-            InlineKeyboardButton(text="ETH", callback_data=f"{action_prefix}_ETH"),
-            InlineKeyboardButton(text="SOL", callback_data=f"{action_prefix}_SOL")
-        ],
-        [
-            InlineKeyboardButton(text="BNB", callback_data=f"{action_prefix}_BNB"),
-            InlineKeyboardButton(text="XRP", callback_data=f"{action_prefix}_XRP"),
-            InlineKeyboardButton(text="ADA", callback_data=f"{action_prefix}_ADA")
-        ]
-    ])
+    """DRY: Динамічна генерація клавіатури на основі SWING_WATCHLIST з .env."""
+    buttons = [InlineKeyboardButton(text=coin, callback_data=f"{action_prefix}_{coin}") for coin in SWING_WATCHLIST]
+    keyboard = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
@@ -70,7 +61,7 @@ async def market_handler(call: CallbackQuery):
 
     price, atr_1d, rsi_1d, funding, df_1d, buy_pct, sell_pct, macd_hist, guide_macd_hist, guide_name, ema50, cur_vol, avg_vol, poc_price, fibo_618 = data
     
-    daily_open = df_1d['open'].iloc[-1]
+    daily_open = float(df_1d['open'].iloc[-1])
     daily_high = daily_open + atr_1d
     daily_low = daily_open - atr_1d
 
@@ -107,28 +98,24 @@ async def ai_forecast_handler(call: CallbackQuery):
 
     price, atr_1d, rsi_1d, funding, df_1d, _, _, macd_hist, guide_macd_hist, guide_name, ema50, cur_vol, avg_vol, poc_price, fibo_618 = data
     
-    daily_open = df_1d['open'].iloc[-1]
+    daily_open = float(df_1d['open'].iloc[-1])
     daily_high = daily_open + atr_1d
     daily_low = daily_open - atr_1d
     
     channel_range = daily_high - daily_low
     position_pct = ((price - daily_low) / channel_range * 100) if channel_range > 0 else 50
     
-    # --- МАТЕМАТИКА РИЗИК-МЕНЕДЖМЕНТУ (Position Sizing) ---
     risk_usd = TRADE_DEPOSIT * (TRADE_RISK_PCT / 100)
     
-    # Сценарій для ЛОНГу (Stop-Loss на 0.2% нижче підтримки ATR)
     long_sl = daily_low * 0.998
     long_risk_per_coin = price - long_sl
     long_amount = risk_usd / long_risk_per_coin if long_risk_per_coin > 0 else 0
-    long_tp = daily_high # Ціль - верхня межа коридору
+    long_tp = daily_high 
     
-    # Сценарій для ШОРТу (Stop-Loss на 0.2% вище опору ATR)
     short_sl = daily_high * 1.002
     short_risk_per_coin = short_sl - price
     short_amount = risk_usd / short_risk_per_coin if short_risk_per_coin > 0 else 0
-    short_tp = daily_low # Ціль - нижня межа коридору
-    # --------------------------------------------------------
+    short_tp = daily_low 
     
     ai_text = await get_ai_forecast(
         symbol=symbol, price=price, daily_low=daily_low, daily_high=daily_high, position_pct=position_pct,
@@ -169,7 +156,7 @@ async def save_log(message: types.Message, state: FSMContext):
     data = await get_market_data(symbol)
     price, atr_1d, rsi_1d, _, df_1d, _, _, _, _, _, _, _, _, _, _ = data
     
-    daily_open = df_1d['open'].iloc[-1]
+    daily_open = float(df_1d['open'].iloc[-1])
     daily_high = daily_open + atr_1d
     daily_low = daily_open - atr_1d
     
@@ -186,30 +173,70 @@ async def save_log(message: types.Message, state: FSMContext):
     await message.answer("✅ У щоденнику!", reply_markup=main_keyboard)
     await wait_msg.delete()
 
-async def check_alerts():
-    # Расширяем список сканирования до 6 фундаментальных активов
-    for symbol in ["BTC", "ETH", "SOL", "BNB", "XRP", "ADA"]: 
+async def check_alerts() -> None:
+    """Системний фоновий чекер макро-аномалій та авто-запуск ШІ."""
+    for symbol in SWING_WATCHLIST: 
         data = await get_market_data(symbol)
         if data[0] is None: continue
         
-        # ... остальная логика радара остается без изменений ...
-        price, atr_1d, rsi_1d, df_1d = data[0], data[1], data[2], data[4]
+        price, atr_1d, rsi_1d, funding, df_1d, buy_pct, sell_pct, macd_hist, guide_macd_hist, guide_name, ema50, cur_vol, avg_vol, poc_price, fibo_618 = data
         
-        daily_open = df_1d['open'].iloc[-1]
+        daily_open = float(df_1d['open'].iloc[-1])
         daily_high = daily_open + atr_1d
         daily_low = daily_open - atr_1d
         
         alert_message, current_alert_type = None, None
 
-        if price >= daily_high: current_alert_type, alert_message = "RESISTANCE", f"🚨 ПРОБІЙ ВГОРУ ({symbol}): {price:.2f}"
-        elif price <= daily_low: current_alert_type, alert_message = "SUPPORT", f"🚨 ПРОБІЙ ВНИЗ ({symbol}): {price:.2f}"
-        elif rsi_1d >= 75: current_alert_type, alert_message = "RSI_HIGH", f"⚠️ ПЕРЕКУПЛЕНІСТЬ ({symbol}): {rsi_1d:.1f}"
-        elif rsi_1d <= 25: current_alert_type, alert_message = "RSI_LOW", f"⚠️ ПЕРЕПРОДАНІСТЬ ({symbol}): {rsi_1d:.1f}"
-        else: alert_state[f"last_{symbol}"] = None
+        is_volume_anomaly: bool = cur_vol > (avg_vol * 1.5)
+        vol_tag = "⚠️ [ІСТИННИЙ ПРОБІЙ З ОБ'ЄМОМ]" if is_volume_anomaly else "[Локальний вихід]"
+
+        if price >= daily_high and is_volume_anomaly: 
+            current_alert_type, alert_message = "TRUE_RESISTANCE", f"🚨 МАКРО-ПРОБІЙ ВГОРУ ({symbol}): {price:,.2f}. {vol_tag}"
+        elif price <= daily_low and is_volume_anomaly: 
+            current_alert_type, alert_message = "TRUE_SUPPORT", f"🚨 МАКРО-ПРОБІЙ ВНИЗ ({symbol}): {price:,.2f}. {vol_tag}"
+        elif rsi_1d >= 80: 
+            current_alert_type, alert_message = "RSI_HIGH", f"🔥 ЕКСТРЕМАЛЬНА ПЕРЕКУПЛЕНІСТЬ ({symbol}): {rsi_1d:.1f}"
+        elif rsi_1d <= 20: 
+            current_alert_type, alert_message = "RSI_LOW", f"🧊 ЕКСТРЕМАЛЬНА ПЕРЕПРОДАНІСТЬ ({symbol}): {rsi_1d:.1f}"
+        else: 
+            alert_state[f"last_{symbol}"] = None
 
         if alert_message and current_alert_type != alert_state.get(f"last_{symbol}"):
             await bot.send_message(chat_id=ADMIN_ID, text=alert_message)
             alert_state[f"last_{symbol}"] = current_alert_type
+            
+            # Авто-запуск AI для підтверджених пробоїв
+            if current_alert_type in ["TRUE_RESISTANCE", "TRUE_SUPPORT"]:
+                await bot.send_message(chat_id=ADMIN_ID, text=f"🧠 Запускаю авто-аналіз Свінг-плану для {symbol}...")
+                
+                news = await fetch_news(symbol)
+                fng_index = await fetch_fear_and_greed()
+                channel_range = daily_high - daily_low
+                position_pct = ((price - daily_low) / channel_range * 100) if channel_range > 0 else 50
+                
+                risk_usd = TRADE_DEPOSIT * (TRADE_RISK_PCT / 100)
+                long_sl = daily_low * 0.998
+                long_risk_per_coin = price - long_sl
+                long_amount = risk_usd / long_risk_per_coin if long_risk_per_coin > 0 else 0
+                long_tp = daily_high 
+                
+                short_sl = daily_high * 1.002
+                short_risk_per_coin = short_sl - price
+                short_amount = risk_usd / short_risk_per_coin if short_risk_per_coin > 0 else 0
+                short_tp = daily_low 
+
+                ai_text = await get_ai_forecast(
+                    symbol=symbol, price=price, daily_low=daily_low, daily_high=daily_high, position_pct=position_pct,
+                    rsi_1d=rsi_1d, macd_hist=macd_hist, guide_macd_hist=guide_macd_hist, 
+                    guide_name=guide_name, fng_index=fng_index, news=news, 
+                    funding_rate=funding, ema50=ema50, cur_vol=cur_vol, avg_vol=avg_vol,
+                    poc_price=poc_price, fibo_618=fibo_618,
+                    risk_usd=risk_usd, long_sl=long_sl, long_amount=long_amount, long_tp=long_tp,
+                    short_sl=short_sl, short_amount=short_amount, short_tp=short_tp
+                )
+                
+                await bot.send_message(chat_id=ADMIN_ID, text=f"🤖 **Auto Swing AI ({symbol}):**\n\n{ai_text}", parse_mode="Markdown")
+                await asyncio.sleep(5)
             
 async def main():
     scheduler.add_job(check_alerts, 'interval', minutes=15)
