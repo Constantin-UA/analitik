@@ -1,5 +1,7 @@
 import asyncio
 import datetime
+import json
+import logging
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -8,14 +10,33 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.exceptions import TelegramBadRequest
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from config import BOT_TOKEN, ADMIN_ID, LOG_CHANNEL_ID, logging, TRADE_DEPOSIT, TRADE_RISK_PCT, SWING_WATCHLIST
+from config import BOT_TOKEN, ADMIN_ID, LOG_CHANNEL_ID, TRADE_DEPOSIT, TRADE_RISK_PCT, SWING_WATCHLIST
 from market import get_market_data, create_chart
 from ai import fetch_news, fetch_fear_and_greed, get_ai_forecast
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 scheduler = AsyncIOScheduler()
-alert_state = {} 
+
+# --- ПАТТЕРН STATE PERSISTENCE (Ізоляція станів) ---
+STATE_FILE = "alert_state.json"
+
+def load_state() -> dict:
+    """Чому винесено окремо: відновлення пам'яті бота після жорсткого рестарту сервера."""
+    try:
+        with open(STATE_FILE, "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+def save_state(state: dict) -> None:
+    """Зберігаємо поточні алерти на диск для захисту від дублювання сигналів."""
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f)
+
+# Завантажуємо стан з диска при старті
+alert_state = load_state()
+# ----------------------------------------------------
 
 class LogState(StatesGroup):
     waiting_for_note = State()
@@ -27,7 +48,7 @@ main_keyboard = ReplyKeyboardMarkup(
     ], resize_keyboard=True
 )
 
-def get_asset_keyboard(action_prefix):
+def get_asset_keyboard(action_prefix: str) -> InlineKeyboardMarkup:
     """DRY: Динамічна генерація клавіатури на основі SWING_WATCHLIST з .env."""
     buttons = [InlineKeyboardButton(text=coin, callback_data=f"{action_prefix}_{coin}") for coin in SWING_WATCHLIST]
     keyboard = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
@@ -174,70 +195,91 @@ async def save_log(message: types.Message, state: FSMContext):
     await wait_msg.delete()
 
 async def check_alerts() -> None:
-    """Системний фоновий чекер макро-аномалій та авто-запуск ШІ."""
-    for symbol in SWING_WATCHLIST: 
-        data = await get_market_data(symbol)
-        if data[0] is None: continue
-        
-        price, atr_1d, rsi_1d, funding, df_1d, buy_pct, sell_pct, macd_hist, guide_macd_hist, guide_name, ema50, cur_vol, avg_vol, poc_price, fibo_618 = data
-        
-        daily_open = float(df_1d['open'].iloc[-1])
-        daily_high = daily_open + atr_1d
-        daily_low = daily_open - atr_1d
-        
-        alert_message, current_alert_type = None, None
-
-        is_volume_anomaly: bool = cur_vol > (avg_vol * 1.5)
-        vol_tag = "⚠️ [ІСТИННИЙ ПРОБІЙ З ОБ'ЄМОМ]" if is_volume_anomaly else "[Локальний вихід]"
-
-        if price >= daily_high and is_volume_anomaly: 
-            current_alert_type, alert_message = "TRUE_RESISTANCE", f"🚨 МАКРО-ПРОБІЙ ВГОРУ ({symbol}): {price:,.2f}. {vol_tag}"
-        elif price <= daily_low and is_volume_anomaly: 
-            current_alert_type, alert_message = "TRUE_SUPPORT", f"🚨 МАКРО-ПРОБІЙ ВНИЗ ({symbol}): {price:,.2f}. {vol_tag}"
-        elif rsi_1d >= 80: 
-            current_alert_type, alert_message = "RSI_HIGH", f"🔥 ЕКСТРЕМАЛЬНА ПЕРЕКУПЛЕНІСТЬ ({symbol}): {rsi_1d:.1f}"
-        elif rsi_1d <= 20: 
-            current_alert_type, alert_message = "RSI_LOW", f"🧊 ЕКСТРЕМАЛЬНА ПЕРЕПРОДАНІСТЬ ({symbol}): {rsi_1d:.1f}"
-        else: 
-            alert_state[f"last_{symbol}"] = None
-
-        if alert_message and current_alert_type != alert_state.get(f"last_{symbol}"):
-            await bot.send_message(chat_id=ADMIN_ID, text=alert_message)
-            alert_state[f"last_{symbol}"] = current_alert_type
+    """Системний фоновий чекер макро-аномалій з вбудованим троттлінгом та обробкою збоїв."""
+    try:
+        for symbol in SWING_WATCHLIST: 
+            data = await get_market_data(symbol)
             
-            # Авто-запуск AI для підтверджених пробоїв
-            if current_alert_type in ["TRUE_RESISTANCE", "TRUE_SUPPORT"]:
-                await bot.send_message(chat_id=ADMIN_ID, text=f"🧠 Запускаю авто-аналіз Свінг-плану для {symbol}...")
-                
-                news = await fetch_news(symbol)
-                fng_index = await fetch_fear_and_greed()
-                channel_range = daily_high - daily_low
-                position_pct = ((price - daily_low) / channel_range * 100) if channel_range > 0 else 50
-                
-                risk_usd = TRADE_DEPOSIT * (TRADE_RISK_PCT / 100)
-                long_sl = daily_low * 0.998
-                long_risk_per_coin = price - long_sl
-                long_amount = risk_usd / long_risk_per_coin if long_risk_per_coin > 0 else 0
-                long_tp = daily_high 
-                
-                short_sl = daily_high * 1.002
-                short_risk_per_coin = short_sl - price
-                short_amount = risk_usd / short_risk_per_coin if short_risk_per_coin > 0 else 0
-                short_tp = daily_low 
-
-                ai_text = await get_ai_forecast(
-                    symbol=symbol, price=price, daily_low=daily_low, daily_high=daily_high, position_pct=position_pct,
-                    rsi_1d=rsi_1d, macd_hist=macd_hist, guide_macd_hist=guide_macd_hist, 
-                    guide_name=guide_name, fng_index=fng_index, news=news, 
-                    funding_rate=funding, ema50=ema50, cur_vol=cur_vol, avg_vol=avg_vol,
-                    poc_price=poc_price, fibo_618=fibo_618,
-                    risk_usd=risk_usd, long_sl=long_sl, long_amount=long_amount, long_tp=long_tp,
-                    short_sl=short_sl, short_amount=short_amount, short_tp=short_tp
-                )
-                
-                await bot.send_message(chat_id=ADMIN_ID, text=f"🤖 **Auto Swing AI ({symbol}):**\n\n{ai_text}", parse_mode="Markdown")
-                await asyncio.sleep(5)
+            # Якщо біржа не відповіла, пропускаємо монету, не ламаючи весь цикл
+            if data[0] is None: 
+                continue 
             
+            price, atr_1d, rsi_1d, funding, df_1d, buy_pct, sell_pct, macd_hist, guide_macd_hist, guide_name, ema50, cur_vol, avg_vol, poc_price, fibo_618 = data
+            
+            daily_open = float(df_1d['open'].iloc[-1])
+            daily_high = daily_open + atr_1d
+            daily_low = daily_open - atr_1d
+            
+            alert_message, current_alert_type = None, None
+
+            is_volume_anomaly: bool = cur_vol > (avg_vol * 1.5)
+            vol_tag = "⚠️ [ІСТИННИЙ ПРОБІЙ З ОБ'ЄМОМ]" if is_volume_anomaly else "[Локальний вихід]"
+
+            if price >= daily_high and is_volume_anomaly: 
+                current_alert_type, alert_message = "TRUE_RESISTANCE", f"🚨 МАКРО-ПРОБІЙ ВГОРУ ({symbol}): {price:,.2f}. {vol_tag}"
+            elif price <= daily_low and is_volume_anomaly: 
+                current_alert_type, alert_message = "TRUE_SUPPORT", f"🚨 МАКРО-ПРОБІЙ ВНИЗ ({symbol}): {price:,.2f}. {vol_tag}"
+            elif rsi_1d >= 80: 
+                current_alert_type, alert_message = "RSI_HIGH", f"🔥 ЕКСТРЕМАЛЬНА ПЕРЕКУПЛЕНІСТЬ ({symbol}): {rsi_1d:.1f}"
+            elif rsi_1d <= 20: 
+                current_alert_type, alert_message = "RSI_LOW", f"🧊 ЕКСТРЕМАЛЬНА ПЕРЕПРОДАНІСТЬ ({symbol}): {rsi_1d:.1f}"
+            else: 
+                alert_state[f"last_{symbol}"] = None
+                save_state(alert_state)
+
+            if alert_message and current_alert_type != alert_state.get(f"last_{symbol}"):
+                await bot.send_message(chat_id=ADMIN_ID, text=alert_message)
+                
+                # Оновлюємо стан і одразу пишемо на диск
+                alert_state[f"last_{symbol}"] = current_alert_type
+                save_state(alert_state)
+                
+                if current_alert_type in ["TRUE_RESISTANCE", "TRUE_SUPPORT"]:
+                    await bot.send_message(chat_id=ADMIN_ID, text=f"🧠 Запускаю авто-аналіз Свінг-плану для {symbol}...")
+                    
+                    news = await fetch_news(symbol)
+                    fng_index = await fetch_fear_and_greed()
+                    channel_range = daily_high - daily_low
+                    position_pct = ((price - daily_low) / channel_range * 100) if channel_range > 0 else 50
+                    
+                    risk_usd = TRADE_DEPOSIT * (TRADE_RISK_PCT / 100)
+                    long_sl = daily_low * 0.998
+                    long_risk_per_coin = price - long_sl
+                    long_amount = risk_usd / long_risk_per_coin if long_risk_per_coin > 0 else 0
+                    long_tp = daily_high 
+                    
+                    short_sl = daily_high * 1.002
+                    short_risk_per_coin = short_sl - price
+                    short_amount = risk_usd / short_risk_per_coin if short_risk_per_coin > 0 else 0
+                    short_tp = daily_low 
+
+                    ai_text = await get_ai_forecast(
+                        symbol=symbol, price=price, daily_low=daily_low, daily_high=daily_high, position_pct=position_pct,
+                        rsi_1d=rsi_1d, macd_hist=macd_hist, guide_macd_hist=guide_macd_hist, 
+                        guide_name=guide_name, fng_index=fng_index, news=news, 
+                        funding_rate=funding, ema50=ema50, cur_vol=cur_vol, avg_vol=avg_vol,
+                        poc_price=poc_price, fibo_618=fibo_618,
+                        risk_usd=risk_usd, long_sl=long_sl, long_amount=long_amount, long_tp=long_tp,
+                        short_sl=short_sl, short_amount=short_amount, short_tp=short_tp
+                    )
+                    
+                    await bot.send_message(chat_id=ADMIN_ID, text=f"🤖 **Auto Swing AI ({symbol}):**\n\n{ai_text}", parse_mode="Markdown")
+                    
+                    # Чому 5 сек: Захист API Gemini від лімітів під час масових ринкових пробоїв
+                    await asyncio.sleep(5)
+            
+            # --- ЗАХИСТ ВІД БАНУ БІРЖІ (Throttling) ---
+            # Забезпечує плавний поллінг без спрацьовування Rate Limit на Bybit (HTTP 429)
+            await asyncio.sleep(1.5) 
+            
+    except Exception as e:
+        # Глобальний перехоплювач фатальних помилок планувальника
+        logging.error(f"Critical error in check_alerts: {e}")
+        try:
+            await bot.send_message(chat_id=ADMIN_ID, text=f"⚠️ **СИСТЕМНИЙ ЗБІЙ У ФОНОВОМУ ПРОЦЕСІ СВІНГ-БОТА:**\n`{e}`\nМодуль продовжує роботу, але потребує уваги.", parse_mode="Markdown")
+        except:
+            pass # Якщо впав сам Telegram API, просто пишемо в лог
+
 async def main():
     scheduler.add_job(check_alerts, 'interval', minutes=15)
     scheduler.start()
