@@ -7,8 +7,8 @@ from market import MarketMetrics
 
 async def fetch_news(symbol: str = "ETH") -> str:
     tags = {
-        "BTC": "bitcoin", 
-        "ETH": "ethereum", 
+        "BTC": "bitcoin",
+        "ETH": "ethereum",
         "SOL": "solana",
         "BNB": "binance-coin",
         "XRP": "ripple",
@@ -23,8 +23,9 @@ async def fetch_news(symbol: str = "ETH") -> str:
                 root = ET.fromstring(xml_data)
                 news = [f"- {item.find('title').text}" for item in root.findall('./channel/item')[:5]]
                 return "\n".join(news)
-    except Exception as e:
-        logging.error(f"Ошибка парсинга новостей: {e}")
+    except Exception:
+        # Захоплюємо стек викликів, якщо RSS-фід недоступний або змінив структуру
+        logging.exception(f"Збій парсингу RSS Cointelegraph для {symbol}")
         return "Не вдалося отримати свіжі новини."
 
 async def fetch_fear_and_greed() -> str:
@@ -33,8 +34,9 @@ async def fetch_fear_and_greed() -> str:
             async with session.get('https://api.alternative.me/fng/?limit=1', timeout=5) as response:
                 data = await response.json()
                 return f"{data['data'][0]['value']}/100 ({data['data'][0]['value_classification']})"
-    except Exception as e:
-        logging.error(f"Ошибка получения Fear & Greed: {e}")
+    except Exception:
+        # Логуємо таймаути або помилки JSON при зміні API
+        logging.exception("Помилка отримання індексу Fear & Greed з alternative.me")
         return "Невідомо"
 
 async def get_ai_forecast(metrics: MarketMetrics, risks: Dict[str, Dict[str, float]], fng_index: str, news: str, risk_usd: float) -> str:
@@ -81,6 +83,6 @@ async def get_ai_forecast(metrics: MarketMetrics, risks: Dict[str, Dict[str, flo
     try:
         response = await ai_model.generate_content_async(prompt, generation_config={"temperature": 0.1})
         return response.text
-    except Exception as e:
-        logging.error(f"Ошибка Gemini API: {e}")
+    except Exception:
+        logging.exception(f"Помилка генерації прогнозу Gemini API для {metrics.symbol}")
         return "Нейромережа зараз недоступна."

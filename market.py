@@ -82,9 +82,10 @@ def fetch_spy_macd_sync() -> float:
         if df.empty:
             return 0.0
         macd = df.ta.macd()
-        return float(macd.iloc[-1, 1]) 
-    except Exception as e:
-        logging.error(f"yfinance error: {e}")
+        return float(macd.iloc[-1, 1])
+    except Exception:
+        # Чому exception: захоплення Traceback для виявлення проблем з мережею або зміною API Yahoo
+        logging.exception("Збій завантаження даних SPY через yfinance")
         return 0.0
 
 async def get_market_data(symbol: str = "ETH", period: int = 14) -> MarketMetrics:
@@ -128,7 +129,7 @@ async def get_market_data(symbol: str = "ETH", period: int = 14) -> MarketMetric
         
         df_1d.ta.atr(length=period, append=True)
         df_1d.ta.rsi(length=period, append=True)
-        df_1d.ta.ema(length=50, append=True) 
+        df_1d.ta.ema(length=50, append=True)
         
         daily_atr = float(df_1d[f'ATRr_{period}'].iloc[-1])
         daily_rsi = float(df_1d[f'RSI_{period}'].iloc[-1])
@@ -157,9 +158,10 @@ async def get_market_data(symbol: str = "ETH", period: int = 14) -> MarketMetric
             guide_name=guide_name, ema50=daily_ema50, cur_vol=current_volume,
             avg_vol=avg_volume_10d, poc_price=poc_price, fibo_618=fibo_618
         )
-    except Exception as e:
+    except Exception:
         await exchange.close()
-        logging.error(f"Ошибка API: {e}")
+        # Чому exception: вичерпне логування падіння обчислень pandas або таймаутів Bybit
+        logging.exception(f"Критична помилка API Bybit або обробки DataFrame для {symbol}")
         return MarketMetrics(
             symbol=symbol, price=0, atr_1d=0, rsi_1d=0, funding_rate=0,
             df_1d=pd.DataFrame(), buy_pressure=0, sell_pressure=0, macd_hist=0,
@@ -171,7 +173,7 @@ def create_chart(df, current_price, daily_high, daily_low, symbol="ETH", filenam
     df_plot = df.tail(45)
     buf = io.BytesIO()
     mpf.plot(
-        df_plot, type='candle', style='charles', 
+        df_plot, type='candle', style='charles',
         hlines=dict(hlines=[daily_high, daily_low, current_price], colors=['r', 'g', 'b'], linestyle='--', alpha=0.6),
         title=f'\n{symbol}/USDT Daily (Bybit)', ylabel='Price', volume=True, ylabel_lower='Volume',
         savefig=dict(fname=buf, dpi=120, bbox_inches='tight', format='png')
