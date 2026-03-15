@@ -1,8 +1,8 @@
 aiogram==3.17.0
-ccxt==4.2.14
-pandas==2.1.4
-pandas-ta==0.3.14b
-mplfinance==0.9.0
+ccxt
+pandas
+pandas-ta
+mplfinance
 google-generativeai
 aiohttp
 python-dotenv

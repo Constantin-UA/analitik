@@ -1,5 +1,6 @@
 # Базовий образ (Slim версія для економії місця)
-FROM python:3.11-slim
+# Змінюємо 3.11 на 3.12
+FROM python:3.12-slim
 
 # Встановлюємо системні залежності для компіляції pandas та інших C-бібліотек
 RUN apt-get update && apt-get install -y --no-install-recommends \
