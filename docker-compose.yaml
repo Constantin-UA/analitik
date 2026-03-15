@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  ethbot:
+    build: .
+    container_name: swing_ethbot
+    restart: unless-stopped  # Автоматичний рестарт при краші або перезавантаженні сервера
+    env_file:
+      - .env  # Прокидаємо секрети з хоста
+    volumes:
+      # Прокидаємо файли назовні, щоб при оновленні контейнера не втратити дані
+      - ./alert_state.json:/app/alert_state.json
+      - ./bot_errors.log:/app/bot_errors.log
