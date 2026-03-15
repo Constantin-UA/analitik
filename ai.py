@@ -1,10 +1,11 @@
 import xml.etree.ElementTree as ET
 import aiohttp
 import logging
+from typing import Dict
 from config import ai_model
+from market import MarketMetrics
 
 async def fetch_news(symbol: str = "ETH") -> str:
-    # Добавляем теги для новых активов
     tags = {
         "BTC": "bitcoin", 
         "ETH": "ethereum", 
@@ -36,30 +37,33 @@ async def fetch_fear_and_greed() -> str:
         logging.error(f"Ошибка получения Fear & Greed: {e}")
         return "Невідомо"
 
-async def get_ai_forecast(symbol, price, daily_low, daily_high, position_pct, rsi_1d, macd_hist, guide_macd_hist, guide_name, fng_index, news, funding_rate, ema50, cur_vol, avg_vol, poc_price, fibo_618, risk_usd, long_sl, long_amount, long_tp, short_sl, short_amount, short_tp):
-    trend_50 = "ВИЩЕ (Глобальний бичачий тренд)" if price > ema50 else "НИЖЧЕ (Глобальний ведмежий тренд)"
-    vol_status = "АНОМАЛЬНИЙ РІСТ" if cur_vol > avg_vol * 1.5 else ("ПАДАЮТЬ" if cur_vol < avg_vol * 0.8 else "В межах норми")
-
+async def get_ai_forecast(metrics: MarketMetrics, risks: Dict[str, Dict[str, float]], fng_index: str, news: str, risk_usd: float) -> str:
+    """
+    Почему передаем весь объект metrics: избавляемся от "Long Parameter List" (code smell).
+    Модель генерации промпта теперь прозрачно читает свойства DTO.
+    """
+    trend_50 = "ВИЩЕ (Глобальний бичачий тренд)" if metrics.price > metrics.ema50 else "НИЖЧЕ (Глобальний ведмежий тренд)"
+    
     prompt = f"""
     Ти — алгоритмічний ризик-менеджер та Chief AI Architect. Твоя спеціалізація — СВІНГ-ТРЕЙДИНГ (утримання 1-3 дні).
     Твоє завдання — провести детермінований аналіз ринкової ситуації та видати чіткий Торговий План.
 
-    ДАНІ РИНКУ (АКТИВ: {symbol}/USDT):
-    - Поточна ціна: {price:.2f}
+    ДАНІ РИНКУ (АКТИВ: {metrics.symbol}/USDT):
+    - Поточна ціна: {metrics.price:.2f}
     - Глобальний тренд (vs EMA 50): Ціна {trend_50}
-    - Денний коридор ATR: Підтримка {daily_low:.2f} | Опір {daily_high:.2f}
-    - Позиція ціни в коридорі: {position_pct:.1f}% (0% = на підтримці, 100% = на опорі, 50% = рівно посередині)
-    - Об'ємний кластер POC (Point of Control 30d): {poc_price:.2f}
-    - Рівень Фібоначчі 0.618: {fibo_618:.2f}
-    - Локальний імпульс (MACD 4H): {'Бичачий (Вгору)' if macd_hist > 0 else 'Ведмежий (Вниз)'}
-    - Макро-поводир ({guide_name}): {'Зростає (Підтримка лонгів)' if guide_macd_hist > 0 else 'Падає (Тиск вниз)'}
+    - Денний коридор ATR: Підтримка {metrics.daily_low:.2f} | Опір {metrics.daily_high:.2f}
+    - Позиція ціни в коридорі: {metrics.position_pct:.1f}% (0% = на підтримці, 100% = на опорі, 50% = рівно посередині)
+    - Об'ємний кластер POC (Point of Control 30d): {metrics.poc_price:.2f}
+    - Рівень Фібоначчі 0.618: {metrics.fibo_618:.2f}
+    - Локальний імпульс (MACD 4H): {'Бичачий (Вгору)' if metrics.macd_hist > 0 else 'Ведмежий (Вниз)'}
+    - Макро-поводир ({metrics.guide_name}): {'Зростає (Підтримка лонгів)' if metrics.guide_macd_hist > 0 else 'Падає (Тиск вниз)'}
     
     ФІНАНСОВА МАТЕМАТИКА (Твій фіксований ризик на угоду складає: ${risk_usd:.2f}):
-    - Якщо ти обираєш ЛОНГ: Безпечний Stop-Loss знаходиться на рівні {long_sl:.2f}. Об'єм позиції для суворого дотримання ризику: {long_amount:.4f} {symbol}. Ціль: {long_tp:.2f}.
-    - Якщо ти обираєш ШОРТ: Безпечний Stop-Loss знаходиться на рівні {short_sl:.2f}. Об'єм позиції для суворого дотримання ризику: {short_amount:.4f} {symbol}. Ціль: {short_tp:.2f}.
+    - Якщо ти обираєш ЛОНГ: Безпечний Stop-Loss: {risks['long']['sl']:.2f}. Об'єм: {risks['long']['amount']:.4f} {metrics.symbol}. Ціль: {risks['long']['tp']:.2f}.
+    - Якщо ти обираєш ШОРТ: Безпечний Stop-Loss: {risks['short']['sl']:.2f}. Об'єм: {risks['short']['amount']:.4f} {metrics.symbol}. Ціль: {risks['short']['tp']:.2f}.
     
     СУВОРИЙ АЛГОРИТМ МІРКУВАНЬ:
-    1. Оціни Позицію ціни в коридорі ({position_pct:.1f}%). Якщо значення між 30% та 70%, ризик відкриття позиції максимальний — торговий план скасовується (ПОЗА РИНКОМ).
+    1. Оціни Позицію ціни в коридорі ({metrics.position_pct:.1f}%). Якщо значення між 30% та 70%, ризик відкриття позиції максимальний — торговий план скасовується (ПОЗА РИНКОМ).
     2. Зістав межі ATR, POC та Фібоначчі для підтвердження безпеки входу.
     
     ФОРМАТ ВІДПОВІДІ:
@@ -70,7 +74,7 @@ async def get_ai_forecast(symbol, price, daily_low, daily_high, position_pct, rs
     (Якщо вердикт ПОЗА РИНКОМ, напиши тут: "Немає безпечного математичного плану для входу. Очікування кращого Risk/Reward.")
     (Якщо ЛОНГ або ШОРТ, скопіюй дані з блоку Фінансова Математика у такому вигляді):
     - 🛡 Вхід: [Поточна ціна]
-    - ⚖️ Об'єм позиції: [Об'єм з математики] {symbol} (Ризик суворо ${risk_usd:.2f})
+    - ⚖️ Об'єм позиції: [Об'єм з математики] {metrics.symbol} (Ризик суворо ${risk_usd:.2f})
     - 🛑 Stop-Loss: [SL з математики]
     - 🏁 Take-Profit: [Ціль з математики]
     """

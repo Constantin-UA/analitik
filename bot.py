@@ -2,12 +2,12 @@ import asyncio
 import datetime
 import json
 import logging
+import aiofiles
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.exceptions import TelegramBadRequest
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from config import BOT_TOKEN, ADMIN_ID, LOG_CHANNEL_ID, TRADE_DEPOSIT, TRADE_RISK_PCT, SWING_WATCHLIST
@@ -18,25 +18,31 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 scheduler = AsyncIOScheduler()
 
-# --- ПАТТЕРН STATE PERSISTENCE (Ізоляція станів) ---
 STATE_FILE = "alert_state.json"
+alert_state: dict = {}
 
-def load_state() -> dict:
-    """Чому винесено окремо: відновлення пам'яті бота після жорсткого рестарту сервера."""
+async def init_state() -> None:
+    """
+    Асинхронная гидратация состояния при запуске бота.
+    Почему асинхронно: предотвращает блокировку Event Loop на старте, 
+    соблюдая чистоту жизненного цикла asyncio.
+    """
+    global alert_state
     try:
-        with open(STATE_FILE, "r") as f:
-            return json.load(f)
+        async with aiofiles.open(STATE_FILE, "r") as f:
+            content = await f.read()
+            alert_state = json.loads(content)
     except FileNotFoundError:
-        return {}
+        alert_state = {}
 
-def save_state(state: dict) -> None:
-    """Зберігаємо поточні алерти на диск для захисту від дублювання сигналів."""
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f)
-
-# Завантажуємо стан з диска при старті
-alert_state = load_state()
-# ----------------------------------------------------
+async def save_state(state: dict) -> None:
+    """
+    Неблокирующая запись на диск.
+    Делегирует I/O операции пулу потоков ОС, сохраняя отзывчивость Telegram-бота 
+    даже во время массовой записи алертов.
+    """
+    async with aiofiles.open(STATE_FILE, "w") as f:
+        await f.write(json.dumps(state))
 
 class LogState(StatesGroup):
     waiting_for_note = State()
@@ -49,7 +55,6 @@ main_keyboard = ReplyKeyboardMarkup(
 )
 
 def get_asset_keyboard(action_prefix: str) -> InlineKeyboardMarkup:
-    """DRY: Динамічна генерація клавіатури на основі SWING_WATCHLIST з .env."""
     buttons = [InlineKeyboardButton(text=coin, callback_data=f"{action_prefix}_{coin}") for coin in SWING_WATCHLIST]
     keyboard = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -76,30 +81,24 @@ async def market_handler(call: CallbackQuery):
     symbol = call.data.split("_")[1]
     await call.message.edit_text(f"⏳ Збираю дані по {symbol}...")
     
-    data = await get_market_data(symbol)
-    if data[0] is None:
+    metrics = await get_market_data(symbol)
+    if not metrics.is_valid:
         return await call.message.edit_text("❌ Помилка отримання даних.")
 
-    price, atr_1d, rsi_1d, funding, df_1d, buy_pct, sell_pct, macd_hist, guide_macd_hist, guide_name, ema50, cur_vol, avg_vol, poc_price, fibo_618 = data
-    
-    daily_open = float(df_1d['open'].iloc[-1])
-    daily_high = daily_open + atr_1d
-    daily_low = daily_open - atr_1d
-
-    chart_buffer = create_chart(df_1d, price, daily_high, daily_low, symbol)
+    chart_buffer = create_chart(metrics.df_1d, metrics.price, metrics.daily_high, metrics.daily_low, symbol)
     photo = BufferedInputFile(chart_buffer.getvalue(), filename="chart.png")
 
-    trend_status = "🟢 Вище EMA50" if price > ema50 else "🔴 Нижче EMA50"
+    trend_status = "🟢 Вище EMA50" if metrics.price > metrics.ema50 else "🔴 Нижче EMA50"
     
     text = (
         f"📊 **Торговий радар {symbol}/USDT**\n\n"
-        f"💰 **Ціна:** `${price:,.2f}` ({trend_status})\n"
-        f"🎯 **Коридор дня:** `🔽 {daily_low:,.0f} --- 🔼 {daily_high:,.0f}`\n\n"
-        f"🧲 **POC (Об'єм 30d):** `{poc_price:,.0f}`\n"
-        f"📐 **Fibo 0.618:** `{fibo_618:,.0f}`\n"
-        f"📈 **RSI (1D):** `{rsi_1d:.1f}`\n"
-        f"⛽️ **Funding:** `{funding * 100:.4f}%`\n"
-        f"🧭 **Тренд 4H:** {symbol} `{'Вгору' if macd_hist > 0 else 'Вниз'}` | {guide_name} `{'Вгору' if guide_macd_hist > 0 else 'Вниз'}`"
+        f"💰 **Ціна:** `${metrics.price:,.2f}` ({trend_status})\n"
+        f"🎯 **Коридор дня:** `🔽 {metrics.daily_low:,.0f} --- 🔼 {metrics.daily_high:,.0f}`\n\n"
+        f"🧲 **POC (Об'єм 30d):** `{metrics.poc_price:,.0f}`\n"
+        f"📐 **Fibo 0.618:** `{metrics.fibo_618:,.0f}`\n"
+        f"📈 **RSI (1D):** `{metrics.rsi_1d:.1f}`\n"
+        f"⛽️ **Funding:** `{metrics.funding_rate * 100:.4f}%`\n"
+        f"🧭 **Тренд 4H:** {symbol} `{'Вгору' if metrics.macd_hist > 0 else 'Вниз'}` | {metrics.guide_name} `{'Вгору' if metrics.guide_macd_hist > 0 else 'Вниз'}`"
     )
     await call.message.delete()
     await call.message.answer_photo(photo=photo, caption=text, parse_mode="Markdown")
@@ -110,43 +109,17 @@ async def ai_forecast_handler(call: CallbackQuery):
     symbol = call.data.split("_")[1]
     await call.message.edit_text(f"🧠 Запускаю ШІ для {symbol}...")
     
-    data = await get_market_data(symbol)
+    metrics = await get_market_data(symbol)
+    if not metrics.is_valid:
+        return await call.message.edit_text("❌ Помилка даних.")
+
     news = await fetch_news(symbol)
     fng_index = await fetch_fear_and_greed()
     
-    if data[0] is None:
-        return await call.message.edit_text("❌ Помилка даних.")
-
-    price, atr_1d, rsi_1d, funding, df_1d, _, _, macd_hist, guide_macd_hist, guide_name, ema50, cur_vol, avg_vol, poc_price, fibo_618 = data
-    
-    daily_open = float(df_1d['open'].iloc[-1])
-    daily_high = daily_open + atr_1d
-    daily_low = daily_open - atr_1d
-    
-    channel_range = daily_high - daily_low
-    position_pct = ((price - daily_low) / channel_range * 100) if channel_range > 0 else 50
-    
     risk_usd = TRADE_DEPOSIT * (TRADE_RISK_PCT / 100)
+    risks = metrics.calculate_risk_params(risk_usd)
     
-    long_sl = daily_low * 0.998
-    long_risk_per_coin = price - long_sl
-    long_amount = risk_usd / long_risk_per_coin if long_risk_per_coin > 0 else 0
-    long_tp = daily_high 
-    
-    short_sl = daily_high * 1.002
-    short_risk_per_coin = short_sl - price
-    short_amount = risk_usd / short_risk_per_coin if short_risk_per_coin > 0 else 0
-    short_tp = daily_low 
-    
-    ai_text = await get_ai_forecast(
-        symbol=symbol, price=price, daily_low=daily_low, daily_high=daily_high, position_pct=position_pct,
-        rsi_1d=rsi_1d, macd_hist=macd_hist, guide_macd_hist=guide_macd_hist, 
-        guide_name=guide_name, fng_index=fng_index, news=news, 
-        funding_rate=funding, ema50=ema50, cur_vol=cur_vol, avg_vol=avg_vol,
-        poc_price=poc_price, fibo_618=fibo_618,
-        risk_usd=risk_usd, long_sl=long_sl, long_amount=long_amount, long_tp=long_tp,
-        short_sl=short_sl, short_amount=short_amount, short_tp=short_tp
-    )
+    ai_text = await get_ai_forecast(metrics, risks, fng_index, news, risk_usd)
     
     await call.message.delete()
     await call.message.answer(f"🤖 **Аналіз AI ({symbol}):**\n\n{ai_text}", parse_mode="Markdown")
@@ -174,20 +147,17 @@ async def save_log(message: types.Message, state: FSMContext):
     wait_msg = await message.answer(f"⏳ Зберігаю лог по {symbol}...")
     await state.clear()
     
-    data = await get_market_data(symbol)
-    price, atr_1d, rsi_1d, _, df_1d, _, _, _, _, _, _, _, _, _, _ = data
+    metrics = await get_market_data(symbol)
+    if not metrics.is_valid:
+        return await message.answer("❌ Помилка збору даних для логу.")
     
-    daily_open = float(df_1d['open'].iloc[-1])
-    daily_high = daily_open + atr_1d
-    daily_low = daily_open - atr_1d
-    
-    chart_buffer = create_chart(df_1d, price, daily_high, daily_low, symbol, "log_chart.png")
+    chart_buffer = create_chart(metrics.df_1d, metrics.price, metrics.daily_high, metrics.daily_low, symbol, "log_chart.png")
     photo = BufferedInputFile(chart_buffer.getvalue(), filename="log_chart.png")
 
     log_text = (
         f"📖 **ЩОДЕННИК УГОДИ ({symbol})** | `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}`\n\n"
         f"📝 **Запис:**\n_{user_note}_\n\n"
-        f"💰 Ціна: `${price:,.2f}` | RSI: `{rsi_1d:.1f}`"
+        f"💰 Ціна: `${metrics.price:,.2f}` | RSI: `{metrics.rsi_1d:.1f}`"
     )
 
     await bot.send_photo(chat_id=LOG_CHANNEL_ID, photo=photo, caption=log_text, parse_mode="Markdown")
@@ -195,94 +165,64 @@ async def save_log(message: types.Message, state: FSMContext):
     await wait_msg.delete()
 
 async def check_alerts() -> None:
-    """Системний фоновий чекер макро-аномалій з вбудованим троттлінгом та обробкою збоїв."""
     try:
         for symbol in SWING_WATCHLIST: 
-            data = await get_market_data(symbol)
-            
-            # Якщо біржа не відповіла, пропускаємо монету, не ламаючи весь цикл
-            if data[0] is None: 
+            metrics = await get_market_data(symbol)
+            if not metrics.is_valid: 
                 continue 
             
-            price, atr_1d, rsi_1d, funding, df_1d, buy_pct, sell_pct, macd_hist, guide_macd_hist, guide_name, ema50, cur_vol, avg_vol, poc_price, fibo_618 = data
-            
-            daily_open = float(df_1d['open'].iloc[-1])
-            daily_high = daily_open + atr_1d
-            daily_low = daily_open - atr_1d
-            
             alert_message, current_alert_type = None, None
-
-            is_volume_anomaly: bool = cur_vol > (avg_vol * 1.5)
+            is_volume_anomaly: bool = metrics.cur_vol > (metrics.avg_vol * 1.5)
             vol_tag = "⚠️ [ІСТИННИЙ ПРОБІЙ З ОБ'ЄМОМ]" if is_volume_anomaly else "[Локальний вихід]"
 
-            if price >= daily_high and is_volume_anomaly: 
-                current_alert_type, alert_message = "TRUE_RESISTANCE", f"🚨 МАКРО-ПРОБІЙ ВГОРУ ({symbol}): {price:,.2f}. {vol_tag}"
-            elif price <= daily_low and is_volume_anomaly: 
-                current_alert_type, alert_message = "TRUE_SUPPORT", f"🚨 МАКРО-ПРОБІЙ ВНИЗ ({symbol}): {price:,.2f}. {vol_tag}"
-            elif rsi_1d >= 80: 
-                current_alert_type, alert_message = "RSI_HIGH", f"🔥 ЕКСТРЕМАЛЬНА ПЕРЕКУПЛЕНІСТЬ ({symbol}): {rsi_1d:.1f}"
-            elif rsi_1d <= 20: 
-                current_alert_type, alert_message = "RSI_LOW", f"🧊 ЕКСТРЕМАЛЬНА ПЕРЕПРОДАНІСТЬ ({symbol}): {rsi_1d:.1f}"
+            if metrics.price >= metrics.daily_high and is_volume_anomaly: 
+                current_alert_type, alert_message = "TRUE_RESISTANCE", f"🚨 МАКРО-ПРОБІЙ ВГОРУ ({symbol}): {metrics.price:,.2f}. {vol_tag}"
+            elif metrics.price <= metrics.daily_low and is_volume_anomaly: 
+                current_alert_type, alert_message = "TRUE_SUPPORT", f"🚨 МАКРО-ПРОБІЙ ВНИЗ ({symbol}): {metrics.price:,.2f}. {vol_tag}"
+            elif metrics.rsi_1d >= 80: 
+                current_alert_type, alert_message = "RSI_HIGH", f"🔥 ЕКСТРЕМАЛЬНА ПЕРЕКУПЛЕНІСТЬ ({symbol}): {metrics.rsi_1d:.1f}"
+            elif metrics.rsi_1d <= 20: 
+                current_alert_type, alert_message = "RSI_LOW", f"🧊 ЕКСТРЕМАЛЬНА ПЕРЕПРОДАНІСТЬ ({symbol}): {metrics.rsi_1d:.1f}"
             else: 
                 alert_state[f"last_{symbol}"] = None
-                save_state(alert_state)
+                await save_state(alert_state)
 
             if alert_message and current_alert_type != alert_state.get(f"last_{symbol}"):
                 await bot.send_message(chat_id=ADMIN_ID, text=alert_message)
                 
-                # Оновлюємо стан і одразу пишемо на диск
                 alert_state[f"last_{symbol}"] = current_alert_type
-                save_state(alert_state)
+                await save_state(alert_state)
                 
                 if current_alert_type in ["TRUE_RESISTANCE", "TRUE_SUPPORT"]:
                     await bot.send_message(chat_id=ADMIN_ID, text=f"🧠 Запускаю авто-аналіз Свінг-плану для {symbol}...")
                     
                     news = await fetch_news(symbol)
                     fng_index = await fetch_fear_and_greed()
-                    channel_range = daily_high - daily_low
-                    position_pct = ((price - daily_low) / channel_range * 100) if channel_range > 0 else 50
                     
                     risk_usd = TRADE_DEPOSIT * (TRADE_RISK_PCT / 100)
-                    long_sl = daily_low * 0.998
-                    long_risk_per_coin = price - long_sl
-                    long_amount = risk_usd / long_risk_per_coin if long_risk_per_coin > 0 else 0
-                    long_tp = daily_high 
-                    
-                    short_sl = daily_high * 1.002
-                    short_risk_per_coin = short_sl - price
-                    short_amount = risk_usd / short_risk_per_coin if short_risk_per_coin > 0 else 0
-                    short_tp = daily_low 
+                    risks = metrics.calculate_risk_params(risk_usd)
 
-                    ai_text = await get_ai_forecast(
-                        symbol=symbol, price=price, daily_low=daily_low, daily_high=daily_high, position_pct=position_pct,
-                        rsi_1d=rsi_1d, macd_hist=macd_hist, guide_macd_hist=guide_macd_hist, 
-                        guide_name=guide_name, fng_index=fng_index, news=news, 
-                        funding_rate=funding, ema50=ema50, cur_vol=cur_vol, avg_vol=avg_vol,
-                        poc_price=poc_price, fibo_618=fibo_618,
-                        risk_usd=risk_usd, long_sl=long_sl, long_amount=long_amount, long_tp=long_tp,
-                        short_sl=short_sl, short_amount=short_amount, short_tp=short_tp
-                    )
+                    ai_text = await get_ai_forecast(metrics, risks, fng_index, news, risk_usd)
                     
                     await bot.send_message(chat_id=ADMIN_ID, text=f"🤖 **Auto Swing AI ({symbol}):**\n\n{ai_text}", parse_mode="Markdown")
-                    
-                    # Чому 5 сек: Захист API Gemini від лімітів під час масових ринкових пробоїв
                     await asyncio.sleep(5)
             
-            # --- ЗАХИСТ ВІД БАНУ БІРЖІ (Throttling) ---
-            # Забезпечує плавний поллінг без спрацьовування Rate Limit на Bybit (HTTP 429)
             await asyncio.sleep(1.5) 
             
     except Exception as e:
-        # Глобальний перехоплювач фатальних помилок планувальника
         logging.error(f"Critical error in check_alerts: {e}")
         try:
             await bot.send_message(chat_id=ADMIN_ID, text=f"⚠️ **СИСТЕМНИЙ ЗБІЙ У ФОНОВОМУ ПРОЦЕСІ СВІНГ-БОТА:**\n`{e}`\nМодуль продовжує роботу, але потребує уваги.", parse_mode="Markdown")
         except:
-            pass # Якщо впав сам Telegram API, просто пишемо в лог
+            pass
 
 async def main():
+    # Явная инициализация состояния до запуска фоновых задач
+    await init_state()
+    
     scheduler.add_job(check_alerts, 'interval', minutes=15)
     scheduler.start()
+    
     await bot.delete_webhook(drop_pending_updates=True) 
     await dp.start_polling(bot)
 

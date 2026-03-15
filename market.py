@@ -7,6 +7,72 @@ import pandas_ta as ta
 import mplfinance as mpf
 import yfinance as yf
 import logging
+from dataclasses import dataclass
+from typing import Dict
+
+@dataclass(frozen=True)
+class MarketMetrics:
+    """
+    DTO для строгой типизации и изоляции рыночных данных.
+    Почему frozen=True: иммутабельность защищает от случайных мутаций состояния в других модулях.
+    """
+    symbol: str
+    price: float
+    atr_1d: float
+    rsi_1d: float
+    funding_rate: float
+    df_1d: pd.DataFrame
+    buy_pressure: float
+    sell_pressure: float
+    macd_hist: float
+    guide_macd_hist: float
+    guide_name: str
+    ema50: float
+    cur_vol: float
+    avg_vol: float
+    poc_price: float
+    fibo_618: float
+    is_valid: bool = True
+
+    @property
+    def daily_open(self) -> float:
+        """Изоляция логики извлечения цены. Защита от IndexError при пустом DataFrame."""
+        return float(self.df_1d['open'].iloc[-1]) if not self.df_1d.empty else 0.0
+
+    @property
+    def daily_high(self) -> float:
+        return self.daily_open + self.atr_1d
+
+    @property
+    def daily_low(self) -> float:
+        return self.daily_open - self.atr_1d
+    
+    @property
+    def channel_range(self) -> float:
+        return self.daily_high - self.daily_low
+
+    @property
+    def position_pct(self) -> float:
+        """Определяет текущее положение цены в ATR-канале (в процентах)."""
+        return ((self.price - self.daily_low) / self.channel_range * 100) if self.channel_range > 0 else 50.0
+
+    def calculate_risk_params(self, risk_usd: float) -> Dict[str, Dict[str, float]]:
+        """
+        Инкапсулированная математика риск-менеджмента.
+        Почему здесь: UI-слой (bot.py) не должен заниматься вычислениями объема сделок.
+        """
+        long_sl = self.daily_low * 0.998
+        long_risk_per_coin = self.price - long_sl
+        long_amount = risk_usd / long_risk_per_coin if long_risk_per_coin > 0 else 0.0
+
+        short_sl = self.daily_high * 1.002
+        short_risk_per_coin = short_sl - self.price
+        short_amount = risk_usd / short_risk_per_coin if short_risk_per_coin > 0 else 0.0
+
+        return {
+            "long": {"sl": long_sl, "tp": self.daily_high, "amount": long_amount},
+            "short": {"sl": short_sl, "tp": self.daily_low, "amount": short_amount}
+        }
 
 def fetch_spy_macd_sync() -> float:
     """Чому синхронно: yfinance не підтримує async з коробки, ізолюємо блокуючий виклик."""
@@ -21,7 +87,7 @@ def fetch_spy_macd_sync() -> float:
         logging.error(f"yfinance error: {e}")
         return 0.0
 
-async def get_market_data(symbol: str = "ETH", period: int = 14) -> tuple:
+async def get_market_data(symbol: str = "ETH", period: int = 14) -> MarketMetrics:
     symbol_spot = f"{symbol}/USDT"
     symbol_perp = f"{symbol}/USDT:USDT"
 
@@ -71,41 +137,35 @@ async def get_market_data(symbol: str = "ETH", period: int = 14) -> tuple:
         current_volume = float(df_1d['volume'].iloc[-1])
         avg_volume_10d = float(df_1d['volume'].rolling(10).mean().iloc[-1])
 
-        # --- НОВИЙ БЛОК: КЛАСТЕРИ ТА ФІБОНАЧЧІ ---
-        # Чому 30 днів: оптимальний горизонт свінг-трейдингу, що відсікає застарілу ліквідність.
         recent_30d = df_1d.tail(30)
         recent_high = float(recent_30d['high'].max())
         recent_low = float(recent_30d['low'].min())
         
-        # Чому 0.618: Золотий перетин найчастіше виступає зоною завершення корекції алгоритмічних ботів.
         fibo_618 = recent_high - (recent_high - recent_low) * 0.618
         
-        # Чому pd.cut: Апроксимація об'ємного профілю (VPVR) через розбиття діапазону на 20 кластерів.
         bins = pd.cut(recent_30d['close'], bins=20)
         volume_by_price = recent_30d.groupby(bins, observed=False)['volume'].sum()
         poc_bin = volume_by_price.idxmax()
         poc_price = float(poc_bin.mid)
-        # ----------------------------------------
-
-        current_date_utc = datetime.datetime.now(datetime.timezone.utc)
-        current_month, current_year = current_date_utc.month, current_date_utc.year
-        this_month_df = df_1d[(df_1d.index.month == current_month) & (df_1d.index.year == current_year)]
-        
-        if not this_month_df.empty:
-            total_days_in_month = len(this_month_df)
-            green_days = (this_month_df['close'] > this_month_df['open']).sum()
-            green_days_pct = (green_days / total_days_in_month) * 100
-        else:
-            total_days_in_month, green_days, green_days_pct = 0, 0, 0
 
         await exchange.close()
-        return (current_price, daily_atr, daily_rsi, funding_rate, df_1d, 
-                buy_pressure, sell_pressure, macd_hist, guide_macd_hist, guide_name, 
-                daily_ema50, current_volume, avg_volume_10d, poc_price, fibo_618)
+        
+        return MarketMetrics(
+            symbol=symbol, price=current_price, atr_1d=daily_atr, rsi_1d=daily_rsi,
+            funding_rate=funding_rate, df_1d=df_1d, buy_pressure=buy_pressure,
+            sell_pressure=sell_pressure, macd_hist=macd_hist, guide_macd_hist=guide_macd_hist,
+            guide_name=guide_name, ema50=daily_ema50, cur_vol=current_volume,
+            avg_vol=avg_volume_10d, poc_price=poc_price, fibo_618=fibo_618
+        )
     except Exception as e:
         await exchange.close()
         logging.error(f"Ошибка API: {e}")
-        return (None,) * 15
+        return MarketMetrics(
+            symbol=symbol, price=0, atr_1d=0, rsi_1d=0, funding_rate=0,
+            df_1d=pd.DataFrame(), buy_pressure=0, sell_pressure=0, macd_hist=0,
+            guide_macd_hist=0, guide_name="", ema50=0, cur_vol=0, avg_vol=0,
+            poc_price=0, fibo_618=0, is_valid=False
+        )
 
 def create_chart(df, current_price, daily_high, daily_low, symbol="ETH", filename="chart.png"):
     df_plot = df.tail(45)

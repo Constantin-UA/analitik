@@ -8,3 +8,4 @@ aiohttp
 python-dotenv
 apscheduler
 yfinance
+aiofiles
