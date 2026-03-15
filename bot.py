@@ -22,11 +22,6 @@ STATE_FILE = "alert_state.json"
 alert_state: dict = {}
 
 async def init_state() -> None:
-    """
-    Асинхронная гидратация состояния при запуске бота.
-    Почему асинхронно: предотвращает блокировку Event Loop на старте, 
-    соблюдая чистоту жизненного цикла asyncio.
-    """
     global alert_state
     try:
         async with aiofiles.open(STATE_FILE, "r") as f:
@@ -34,15 +29,17 @@ async def init_state() -> None:
             alert_state = json.loads(content)
     except FileNotFoundError:
         alert_state = {}
+    except Exception:
+        # Чому logging.exception: автоматично захоплює Traceback для файлу бот-логу
+        logging.exception("Помилка під час гідратації стану alert_state.json")
+        alert_state = {}
 
 async def save_state(state: dict) -> None:
-    """
-    Неблокирующая запись на диск.
-    Делегирует I/O операции пулу потоков ОС, сохраняя отзывчивость Telegram-бота 
-    даже во время массовой записи алертов.
-    """
-    async with aiofiles.open(STATE_FILE, "w") as f:
-        await f.write(json.dumps(state))
+    try:
+        async with aiofiles.open(STATE_FILE, "w") as f:
+            await f.write(json.dumps(state))
+    except Exception:
+        logging.exception("Критичний збій запису стану алертів на диск.")
 
 class LogState(StatesGroup):
     waiting_for_note = State()
@@ -83,25 +80,29 @@ async def market_handler(call: CallbackQuery):
     
     metrics = await get_market_data(symbol)
     if not metrics.is_valid:
-        return await call.message.edit_text("❌ Помилка отримання даних.")
+        return await call.message.edit_text("❌ Помилка отримання даних. Перевірте логи сервера.")
 
-    chart_buffer = create_chart(metrics.df_1d, metrics.price, metrics.daily_high, metrics.daily_low, symbol)
-    photo = BufferedInputFile(chart_buffer.getvalue(), filename="chart.png")
+    try:
+        chart_buffer = create_chart(metrics.df_1d, metrics.price, metrics.daily_high, metrics.daily_low, symbol)
+        photo = BufferedInputFile(chart_buffer.getvalue(), filename="chart.png")
 
-    trend_status = "🟢 Вище EMA50" if metrics.price > metrics.ema50 else "🔴 Нижче EMA50"
-    
-    text = (
-        f"📊 **Торговий радар {symbol}/USDT**\n\n"
-        f"💰 **Ціна:** `${metrics.price:,.2f}` ({trend_status})\n"
-        f"🎯 **Коридор дня:** `🔽 {metrics.daily_low:,.0f} --- 🔼 {metrics.daily_high:,.0f}`\n\n"
-        f"🧲 **POC (Об'єм 30d):** `{metrics.poc_price:,.0f}`\n"
-        f"📐 **Fibo 0.618:** `{metrics.fibo_618:,.0f}`\n"
-        f"📈 **RSI (1D):** `{metrics.rsi_1d:.1f}`\n"
-        f"⛽️ **Funding:** `{metrics.funding_rate * 100:.4f}%`\n"
-        f"🧭 **Тренд 4H:** {symbol} `{'Вгору' if metrics.macd_hist > 0 else 'Вниз'}` | {metrics.guide_name} `{'Вгору' if metrics.guide_macd_hist > 0 else 'Вниз'}`"
-    )
-    await call.message.delete()
-    await call.message.answer_photo(photo=photo, caption=text, parse_mode="Markdown")
+        trend_status = "🟢 Вище EMA50" if metrics.price > metrics.ema50 else "🔴 Нижче EMA50"
+        
+        text = (
+            f"📊 **Торговий радар {symbol}/USDT**\n\n"
+            f"💰 **Ціна:** `${metrics.price:,.2f}` ({trend_status})\n"
+            f"🎯 **Коридор дня:** `🔽 {metrics.daily_low:,.0f} --- 🔼 {metrics.daily_high:,.0f}`\n\n"
+            f"🧲 **POC (Об'єм 30d):** `{metrics.poc_price:,.0f}`\n"
+            f"📐 **Fibo 0.618:** `{metrics.fibo_618:,.0f}`\n"
+            f"📈 **RSI (1D):** `{metrics.rsi_1d:.1f}`\n"
+            f"⛽️ **Funding:** `{metrics.funding_rate * 100:.4f}%`\n"
+            f"🧭 **Тренд 4H:** {symbol} `{'Вгору' if metrics.macd_hist > 0 else 'Вниз'}` | {metrics.guide_name} `{'Вгору' if metrics.guide_macd_hist > 0 else 'Вниз'}`"
+        )
+        await call.message.delete()
+        await call.message.answer_photo(photo=photo, caption=text, parse_mode="Markdown")
+    except Exception:
+        logging.exception(f"Помилка рендеру графіка або відправки повідомлення для {symbol}")
+        await call.message.answer("❌ Сталася внутрішня помилка при формуванні графіка.")
 
 @dp.callback_query(F.data.startswith("ai_"))
 async def ai_forecast_handler(call: CallbackQuery):
@@ -111,18 +112,24 @@ async def ai_forecast_handler(call: CallbackQuery):
     
     metrics = await get_market_data(symbol)
     if not metrics.is_valid:
-        return await call.message.edit_text("❌ Помилка даних.")
+        return await call.message.edit_text("❌ Помилка даних. Деталі в bot_errors.log")
 
-    news = await fetch_news(symbol)
-    fng_index = await fetch_fear_and_greed()
-    
-    risk_usd = TRADE_DEPOSIT * (TRADE_RISK_PCT / 100)
-    risks = metrics.calculate_risk_params(risk_usd)
-    
-    ai_text = await get_ai_forecast(metrics, risks, fng_index, news, risk_usd)
-    
-    await call.message.delete()
-    await call.message.answer(f"🤖 **Аналіз AI ({symbol}):**\n\n{ai_text}", parse_mode="Markdown")
+    try:
+        news, fng_index = await asyncio.gather(
+            fetch_news(symbol),
+            fetch_fear_and_greed()
+        )
+        
+        risk_usd = TRADE_DEPOSIT * (TRADE_RISK_PCT / 100)
+        risks = metrics.calculate_risk_params(risk_usd)
+        
+        ai_text = await get_ai_forecast(metrics, risks, fng_index, news, risk_usd)
+        
+        await call.message.delete()
+        await call.message.answer(f"🤖 **Аналіз AI ({symbol}):**\n\n{ai_text}", parse_mode="Markdown")
+    except Exception:
+        logging.exception(f"Помилка під час генерації ШІ-прогнозу для {symbol}")
+        await call.message.answer("❌ Збій нейромережі. Розробник вже сповіщений через лог.")
 
 @dp.callback_query(F.data.startswith("log_"))
 async def start_log_process(call: CallbackQuery, state: FSMContext):
@@ -151,18 +158,23 @@ async def save_log(message: types.Message, state: FSMContext):
     if not metrics.is_valid:
         return await message.answer("❌ Помилка збору даних для логу.")
     
-    chart_buffer = create_chart(metrics.df_1d, metrics.price, metrics.daily_high, metrics.daily_low, symbol, "log_chart.png")
-    photo = BufferedInputFile(chart_buffer.getvalue(), filename="log_chart.png")
+    try:
+        chart_buffer = create_chart(metrics.df_1d, metrics.price, metrics.daily_high, metrics.daily_low, symbol, "log_chart.png")
+        photo = BufferedInputFile(chart_buffer.getvalue(), filename="log_chart.png")
 
-    log_text = (
-        f"📖 **ЩОДЕННИК УГОДИ ({symbol})** | `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}`\n\n"
-        f"📝 **Запис:**\n_{user_note}_\n\n"
-        f"💰 Ціна: `${metrics.price:,.2f}` | RSI: `{metrics.rsi_1d:.1f}`"
-    )
+        log_text = (
+            f"📖 **ЩОДЕННИК УГОДИ ({symbol})** | `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}`\n\n"
+            f"📝 **Запис:**\n_{user_note}_\n\n"
+            f"💰 Ціна: `${metrics.price:,.2f}` | RSI: `{metrics.rsi_1d:.1f}`"
+        )
 
-    await bot.send_photo(chat_id=LOG_CHANNEL_ID, photo=photo, caption=log_text, parse_mode="Markdown")
-    await message.answer("✅ У щоденнику!", reply_markup=main_keyboard)
-    await wait_msg.delete()
+        await bot.send_photo(chat_id=LOG_CHANNEL_ID, photo=photo, caption=log_text, parse_mode="Markdown")
+        await message.answer("✅ У щоденнику!", reply_markup=main_keyboard)
+    except Exception:
+        logging.exception(f"Збій збереження щоденника для {symbol}")
+        await message.answer("❌ Помилка відправки логу в канал.")
+    finally:
+        await wait_msg.delete()
 
 async def check_alerts() -> None:
     try:
@@ -196,8 +208,10 @@ async def check_alerts() -> None:
                 if current_alert_type in ["TRUE_RESISTANCE", "TRUE_SUPPORT"]:
                     await bot.send_message(chat_id=ADMIN_ID, text=f"🧠 Запускаю авто-аналіз Свінг-плану для {symbol}...")
                     
-                    news = await fetch_news(symbol)
-                    fng_index = await fetch_fear_and_greed()
+                    news, fng_index = await asyncio.gather(
+                        fetch_news(symbol),
+                        fetch_fear_and_greed()
+                    )
                     
                     risk_usd = TRADE_DEPOSIT * (TRADE_RISK_PCT / 100)
                     risks = metrics.calculate_risk_params(risk_usd)
@@ -209,17 +223,16 @@ async def check_alerts() -> None:
             
             await asyncio.sleep(1.5) 
             
-    except Exception as e:
-        logging.error(f"Critical error in check_alerts: {e}")
+    except Exception:
+        # Тут logging.exception збереже весь дамп пам'яті: рядок падіння і локальні змінні
+        logging.exception("Фатальний системний збій у фоновому процесі check_alerts")
         try:
-            await bot.send_message(chat_id=ADMIN_ID, text=f"⚠️ **СИСТЕМНИЙ ЗБІЙ У ФОНОВОМУ ПРОЦЕСІ СВІНГ-БОТА:**\n`{e}`\nМодуль продовжує роботу, але потребує уваги.", parse_mode="Markdown")
+            await bot.send_message(chat_id=ADMIN_ID, text="⚠️ **КРИТИЧНА ПОМИЛКА СВІНГ-БОТА**\nПроцес `check_alerts` впав. Деталі у файлі `bot_errors.log`. Модуль продовжує роботу через планувальник.", parse_mode="Markdown")
         except:
             pass
 
 async def main():
-    # Явная инициализация состояния до запуска фоновых задач
     await init_state()
-    
     scheduler.add_job(check_alerts, 'interval', minutes=15)
     scheduler.start()
     
