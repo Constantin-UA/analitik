@@ -290,7 +290,7 @@ async def check_alerts() -> None:
                         await open_trade(symbol, "SHORT", metrics.price, risks['short']['sl'], risks['short']['tp'], risks['short']['amount'])
                         await bot.send_message(chat_id=ADMIN_ID, text=f"✅ Віртуальна SHORT позиція по {symbol} автоматично відкрита в БД.")
                     
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(15)
             
             await asyncio.sleep(1.5) 
             
