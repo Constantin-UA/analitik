@@ -3,7 +3,7 @@ ccxt
 pandas
 pandas-ta
 mplfinance
-google-generativeai
+google-genai
 aiohttp
 python-dotenv
 apscheduler

@@ -2,8 +2,9 @@ import xml.etree.ElementTree as ET
 import aiohttp
 import logging
 from typing import Dict
-from config import ai_model
+from config import ai_client
 from market import MarketMetrics
+from google import genai
 
 async def fetch_news(symbol: str = "ETH") -> str:
     tags = {
@@ -24,7 +25,6 @@ async def fetch_news(symbol: str = "ETH") -> str:
                 news = [f"- {item.find('title').text}" for item in root.findall('./channel/item')[:5]]
                 return "\n".join(news)
     except Exception:
-        # Захоплюємо стек викликів, якщо RSS-фід недоступний або змінив структуру
         logging.exception(f"Збій парсингу RSS Cointelegraph для {symbol}")
         return "Не вдалося отримати свіжі новини."
 
@@ -35,17 +35,14 @@ async def fetch_fear_and_greed() -> str:
                 data = await response.json()
                 return f"{data['data'][0]['value']}/100 ({data['data'][0]['value_classification']})"
     except Exception:
-        # Логуємо таймаути або помилки JSON при зміні API
         logging.exception("Помилка отримання індексу Fear & Greed з alternative.me")
         return "Невідомо"
 
 async def get_ai_forecast(metrics: MarketMetrics, risks: Dict[str, Dict[str, float]], fng_index: str, news: str, risk_usd: float) -> str:
     trend_50 = "ВИЩЕ (Бичачий)" if metrics.price > metrics.ema50 else "НИЖЧЕ (Ведмежий)"
     
-    # Визначаємо аномалії об'єму для ШІ
     vol_anomaly = "АНОМАЛЬНИЙ СПЛЕСК" if metrics.cur_vol > (metrics.avg_vol * 1.5) else "В межах норми"
     
-    # Розрахунок R:R (Risk/Reward) для лонга і шорта. Захист від ділення на нуль.
     long_risk = metrics.price - risks['long']['sl']
     long_rr = (risks['long']['tp'] - metrics.price) / long_risk if long_risk > 0 else 0
     
@@ -94,7 +91,13 @@ async def get_ai_forecast(metrics: MarketMetrics, risks: Dict[str, Dict[str, flo
     - 🏁 Take-Profit: [Відповідний TP]
     """
     try:
-        response = await ai_model.generate_content_async(prompt, generation_config={"temperature": 0.1})
+        response = await ai_client.aio.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+            config=genai.types.GenerateContentConfig(
+                temperature=0.1,
+            )
+        )
         return response.text
     except Exception:
         logging.exception(f"Помилка генерації прогнозу Gemini API для {metrics.symbol}")
