@@ -92,7 +92,7 @@ async def get_market_data(symbol: str = "ETH", period: int = 14) -> MarketMetric
     symbol_spot = f"{symbol}/USDT"
     symbol_perp = f"{symbol}/USDT:USDT"
 
-    exchange = ccxt.bybit({'enableRateLimit': True},'timeout': 30000)
+    exchange = ccxt.bybit({'enableRateLimit': True,'timeout': 30000})
     try:
         ticker = await exchange.fetch_ticker(symbol_spot)
         current_price = ticker['last']
