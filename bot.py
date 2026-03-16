@@ -13,6 +13,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from config import BOT_TOKEN, ADMIN_ID, LOG_CHANNEL_ID, TRADE_DEPOSIT, TRADE_RISK_PCT, SWING_WATCHLIST
 from market import get_market_data, create_chart
 from ai import fetch_news, fetch_fear_and_greed, get_ai_forecast
+from database import init_db, open_trade, get_open_trades, close_trade
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -30,7 +31,7 @@ async def init_state() -> None:
     except FileNotFoundError:
         alert_state = {}
     except Exception:
-        # Чому logging.exception: автоматично захоплює Traceback для файлу бот-логу
+        # Чому logging.exception: автоматичне захоплення Traceback для спрощення відлагодження
         logging.exception("Помилка під час гідратації стану alert_state.json")
         alert_state = {}
 
@@ -178,6 +179,54 @@ async def save_log(message: types.Message, state: FSMContext):
 
 async def check_alerts() -> None:
     try:
+        # --- СИСТЕМА СТЕЖЕННЯ ЗА ВІДКРИТИМИ УГОДАМИ (Paper Trading) ---
+        # Чому спочатку перевіряємо відкриті угоди: балансуючий зворотний зв'язок 
+        # для гарантованої фіксації результату до аналізу нових сетапів.
+        open_trades = await get_open_trades()
+        for trade in open_trades:
+            metrics = await get_market_data(trade['symbol'])
+            if not metrics.is_valid:
+                continue
+                
+            current_price = metrics.price
+            trade_id = trade['id']
+            side = trade['side']
+            sl = trade['stop_loss']
+            tp = trade['take_profit']
+            vol = trade['volume']
+            
+            is_closed = False
+            pnl = 0.0
+            result_tag = ""
+            
+            if side == 'LONG':
+                if current_price >= tp:
+                    is_closed, result_tag = True, 'WIN_TP'
+                    pnl = (tp - trade['entry_price']) * vol
+                elif current_price <= sl:
+                    is_closed, result_tag = True, 'LOSS_SL'
+                    pnl = (sl - trade['entry_price']) * vol
+            elif side == 'SHORT':
+                if current_price <= tp:
+                    is_closed, result_tag = True, 'WIN_TP'
+                    pnl = (trade['entry_price'] - tp) * vol
+                elif current_price >= sl:
+                    is_closed, result_tag = True, 'LOSS_SL'
+                    pnl = (trade['entry_price'] - sl) * vol
+                    
+            if is_closed:
+                await close_trade(trade_id, current_price, pnl, result_tag)
+                emoji = "🟢" if pnl > 0 else "🔴"
+                report = (
+                    f"{emoji} **СДЕЛКА ЗАКРЫТА ({trade['symbol']})**\n\n"
+                    f"Напрямок: `{side}`\n"
+                    f"Результат: `{result_tag}`\n"
+                    f"Прибуток/Збиток: `${pnl:.2f}`\n"
+                )
+                await bot.send_message(chat_id=ADMIN_ID, text=report, parse_mode="Markdown")
+        # -------------------------------------------------------------
+
+        # --- СИСТЕМА ПОШУКУ НОВИХ СИГНАЛІВ ---
         for symbol in SWING_WATCHLIST: 
             metrics = await get_market_data(symbol)
             if not metrics.is_valid: 
@@ -219,12 +268,22 @@ async def check_alerts() -> None:
                     ai_text = await get_ai_forecast(metrics, risks, fng_index, news, risk_usd)
                     
                     await bot.send_message(chat_id=ADMIN_ID, text=f"🤖 **Auto Swing AI ({symbol}):**\n\n{ai_text}", parse_mode="Markdown")
+                    
+                    # --- АВТОМАТИЧНА ЕКСТРАКЦІЯ НАМІРІВ ---
+                    # Чому String Matching: уникнення крихкого парсингу JSON з відповідей нейромережі.
+                    if "**💡 Свінг-вердикт**: ЛОНГ" in ai_text:
+                        await open_trade(symbol, "LONG", metrics.price, risks['long']['sl'], risks['long']['tp'], risks['long']['amount'])
+                        await bot.send_message(chat_id=ADMIN_ID, text=f"✅ Віртуальна LONG позиція по {symbol} автоматично відкрита в БД.")
+                    elif "**💡 Свінг-вердикт**: ШОРТ" in ai_text:
+                        await open_trade(symbol, "SHORT", metrics.price, risks['short']['sl'], risks['short']['tp'], risks['short']['amount'])
+                        await bot.send_message(chat_id=ADMIN_ID, text=f"✅ Віртуальна SHORT позиція по {symbol} автоматично відкрита в БД.")
+                    # ----------------------------------------
+                    
                     await asyncio.sleep(5)
             
             await asyncio.sleep(1.5) 
             
     except Exception:
-        # Тут logging.exception збереже весь дамп пам'яті: рядок падіння і локальні змінні
         logging.exception("Фатальний системний збій у фоновому процесі check_alerts")
         try:
             await bot.send_message(chat_id=ADMIN_ID, text="⚠️ **КРИТИЧНА ПОМИЛКА СВІНГ-БОТА**\nПроцес `check_alerts` впав. Деталі у файлі `bot_errors.log`. Модуль продовжує роботу через планувальник.", parse_mode="Markdown")
@@ -233,6 +292,8 @@ async def check_alerts() -> None:
 
 async def main():
     await init_state()
+    await init_db() # Гарантуємо наявність таблиць до запуску планувальника
+    
     scheduler.add_job(check_alerts, 'interval', minutes=15)
     scheduler.start()
     
