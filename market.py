@@ -58,20 +58,25 @@ class MarketMetrics:
 
     def calculate_risk_params(self, risk_usd: float) -> Dict[str, Dict[str, float]]:
         """
-        Инкапсулированная математика риск-менеджмента.
-        Почему здесь: UI-слой (bot.py) не должен заниматься вычислениями объема сделок.
+        Інкапсульована математика ризик-менеджменту.
+        Зміна архітектури: динамічні рівні на базі поточного ATR та ціни.
+        Це гарантує валідну математику (R:R) навіть під час сильних пробоїв.
         """
-        long_sl = self.daily_low * 0.998
+        # Сценарій LONG: Стоп під поточною ціною (відступ 1 ATR), Тейк зверху (2 ATR)
+        long_sl = self.price - self.atr_1d
+        long_tp = self.price + (self.atr_1d * 2)
         long_risk_per_coin = self.price - long_sl
         long_amount = risk_usd / long_risk_per_coin if long_risk_per_coin > 0 else 0.0
 
-        short_sl = self.daily_high * 1.002
+        # Сценарій SHORT: Стоп над поточною ціною (відступ 1 ATR), Тейк знизу (2 ATR)
+        short_sl = self.price + self.atr_1d
+        short_tp = self.price - (self.atr_1d * 2)
         short_risk_per_coin = short_sl - self.price
         short_amount = risk_usd / short_risk_per_coin if short_risk_per_coin > 0 else 0.0
 
         return {
-            "long": {"sl": long_sl, "tp": self.daily_high, "amount": long_amount},
-            "short": {"sl": short_sl, "tp": self.daily_low, "amount": short_amount}
+            "long": {"sl": long_sl, "tp": long_tp, "amount": long_amount},
+            "short": {"sl": short_sl, "tp": short_tp, "amount": short_amount}
         }
 
 def fetch_spy_macd_sync() -> float:
