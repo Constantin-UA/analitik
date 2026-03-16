@@ -56,11 +56,21 @@ async def get_open_trades() -> List[Dict]:
         logging.exception("Помилка читання відкритих угод з БД")
         return []
 
+async def get_closed_trades() -> List[Dict]:
+    """Витягує всі завершені угоди для розрахунку статистики та малювання Equity."""
+    try:
+        async with aiosqlite.connect(DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            # Фільтруємо лише закриті угоди і сортуємо їх за часом закриття
+            async with db.execute("SELECT * FROM trades WHERE status IN ('WIN_TP', 'LOSS_SL') ORDER BY close_time ASC") as cursor:
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
+    except Exception:
+        logging.exception("Помилка читання закритих угод з БД")
+        return []
+
 async def close_trade(trade_id: int, close_price: float, pnl_usd: float, result_type: str) -> None:
-    """
-    Термінація життєвого циклу угоди.
-    Чому result_type: дозволяє розрізняти закриття по TP, SL або ручне скасування.
-    """
+    """Термінація життєвого циклу угоди."""
     close_time = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
     try:
         async with aiosqlite.connect(DB_FILE) as db:

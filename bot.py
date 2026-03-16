@@ -3,17 +3,17 @@ import datetime
 import json
 import logging
 import aiofiles
+import io
+import matplotlib.pyplot as plt
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from config import BOT_TOKEN, ADMIN_ID, LOG_CHANNEL_ID, TRADE_DEPOSIT, TRADE_RISK_PCT, SWING_WATCHLIST
+from config import BOT_TOKEN, ADMIN_ID, TRADE_DEPOSIT, TRADE_RISK_PCT, SWING_WATCHLIST
 from market import get_market_data, create_chart
 from ai import fetch_news, fetch_fear_and_greed, get_ai_forecast
-from database import init_db, open_trade, get_open_trades, close_trade
+from database import init_db, open_trade, get_open_trades, get_closed_trades, close_trade
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -31,7 +31,6 @@ async def init_state() -> None:
     except FileNotFoundError:
         alert_state = {}
     except Exception:
-        # Чому logging.exception: автоматичне захоплення Traceback для спрощення відлагодження
         logging.exception("Помилка під час гідратації стану alert_state.json")
         alert_state = {}
 
@@ -42,13 +41,11 @@ async def save_state(state: dict) -> None:
     except Exception:
         logging.exception("Критичний збій запису стану алертів на диск.")
 
-class LogState(StatesGroup):
-    waiting_for_note = State()
-
+# --- ОНОВЛЕНА КЛАВІАТУРА ---
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📈 Analize"), KeyboardButton(text="🧠 AI Прогноз")],
-        [KeyboardButton(text="📝 Log")]
+        [KeyboardButton(text="📊 Статистика")] # Кнопка логу замінена на статистику
     ], resize_keyboard=True
 )
 
@@ -56,6 +53,43 @@ def get_asset_keyboard(action_prefix: str) -> InlineKeyboardMarkup:
     buttons = [InlineKeyboardButton(text=coin, callback_data=f"{action_prefix}_{coin}") for coin in SWING_WATCHLIST]
     keyboard = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+def create_equity_chart(trades: list, initial_deposit: float) -> io.BytesIO:
+    """Інкапсульована логіка генерації графіка кривої капіталу."""
+    equity = [initial_deposit]
+    labels = ["Start"]
+    
+    current_equity = initial_deposit
+    for i, trade in enumerate(trades):
+        current_equity += trade['pnl_usd']
+        equity.append(current_equity)
+        labels.append(f"#{i+1}")
+
+    plt.figure(figsize=(10, 5), facecolor='#1e1e1e')
+    ax = plt.gca()
+    ax.set_facecolor('#1e1e1e')
+    ax.tick_params(colors='white')
+    ax.xaxis.label.set_color('white')
+    ax.yaxis.label.set_color('white')
+    ax.title.set_color('white')
+    
+    # Малюємо криву
+    plt.plot(labels, equity, marker='o', linestyle='-', color='#00ffcc', linewidth=2, markersize=6)
+    plt.title('Крива Капіталу (Equity Curve)')
+    plt.xlabel('Ітерації угод')
+    plt.ylabel('Депозит (USD)')
+    plt.grid(True, linestyle='--', alpha=0.3, color='gray')
+    
+    # Лінія початкового депозиту
+    plt.axhline(y=initial_deposit, color='#ff4444', linestyle='--', label='Початковий баланс', alpha=0.7)
+    plt.legend(facecolor='#1e1e1e', edgecolor='none', labelcolor='white')
+    plt.tight_layout()
+    
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=120)
+    buf.seek(0)
+    plt.close()
+    return buf
 
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
@@ -69,9 +103,39 @@ async def ask_analyze(message: types.Message):
 async def ask_ai(message: types.Message):
     await message.answer("Оберіть актив для ШІ-прогнозу:", reply_markup=get_asset_keyboard("ai"))
 
-@dp.message(F.text == "📝 Log")
-async def ask_log(message: types.Message):
-    await message.answer("Для якого активу пишемо лог?", reply_markup=get_asset_keyboard("log"))
+# --- НОВИЙ ОБРОБНИК СТАТИСТИКИ ---
+@dp.message(F.text == "📊 Статистика")
+async def show_statistics(message: types.Message):
+    wait_msg = await message.answer("⏳ Агрегую дані з бази SQLite...")
+    
+    trades = await get_closed_trades()
+    if not trades:
+        return await wait_msg.edit_text("📭 База даних порожня. Алгоритм ще не завершив жодної угоди.")
+        
+    total_trades = len(trades)
+    wins = sum(1 for t in trades if t['pnl_usd'] > 0)
+    losses = total_trades - wins
+    winrate = (wins / total_trades) * 100
+    total_pnl = sum(t['pnl_usd'] for t in trades)
+    current_deposit = TRADE_DEPOSIT + total_pnl
+    
+    chart_buffer = create_equity_chart(trades, TRADE_DEPOSIT)
+    photo = BufferedInputFile(chart_buffer.getvalue(), filename="equity.png")
+    
+    stats_text = (
+        f"📊 **АЛГОРИТМІЧНА СТАТИСТИКА**\n\n"
+        f"💸 Початковий депозит: `${TRADE_DEPOSIT:,.2f}`\n"
+        f"🏦 Поточний баланс: `${current_deposit:,.2f}`\n"
+        f"📈 Чистий PnL: `${total_pnl:,.2f}`\n\n"
+        f"🔄 Всього угод: `{total_trades}`\n"
+        f"✅ Успішних (WIN): `{wins}`\n"
+        f"❌ Збиткових (LOSS): `{losses}`\n"
+        f"🎯 **Winrate:** `{winrate:.1f}%`\n"
+    )
+    
+    await message.answer_photo(photo=photo, caption=stats_text, parse_mode="Markdown")
+    await wait_msg.delete()
+# ----------------------------------
 
 @dp.callback_query(F.data.startswith("market_"))
 async def market_handler(call: CallbackQuery):
@@ -132,56 +196,8 @@ async def ai_forecast_handler(call: CallbackQuery):
         logging.exception(f"Помилка під час генерації ШІ-прогнозу для {symbol}")
         await call.message.answer("❌ Збій нейромережі. Розробник вже сповіщений через лог.")
 
-@dp.callback_query(F.data.startswith("log_"))
-async def start_log_process(call: CallbackQuery, state: FSMContext):
-    await call.answer()
-    symbol = call.data.split("_")[1]
-    await state.update_data(symbol=symbol) 
-    await state.set_state(LogState.waiting_for_note)
-    await call.message.delete()
-    await call.message.answer(f"✍️ Опишіть думку по **{symbol}**:", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="❌ Скасувати")]], resize_keyboard=True))
-
-@dp.message(F.text == "❌ Скасувати", LogState.waiting_for_note)
-async def cancel_log(message: types.Message, state: FSMContext):
-    await state.clear()
-    await message.answer("Скасовано.", reply_markup=main_keyboard)
-
-@dp.message(LogState.waiting_for_note)
-async def save_log(message: types.Message, state: FSMContext):
-    user_data = await state.get_data()
-    symbol = user_data.get("symbol", "ETH")
-    user_note = message.text
-    
-    wait_msg = await message.answer(f"⏳ Зберігаю лог по {symbol}...")
-    await state.clear()
-    
-    metrics = await get_market_data(symbol)
-    if not metrics.is_valid:
-        return await message.answer("❌ Помилка збору даних для логу.")
-    
-    try:
-        chart_buffer = create_chart(metrics.df_1d, metrics.price, metrics.daily_high, metrics.daily_low, symbol, "log_chart.png")
-        photo = BufferedInputFile(chart_buffer.getvalue(), filename="log_chart.png")
-
-        log_text = (
-            f"📖 **ЩОДЕННИК УГОДИ ({symbol})** | `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}`\n\n"
-            f"📝 **Запис:**\n_{user_note}_\n\n"
-            f"💰 Ціна: `${metrics.price:,.2f}` | RSI: `{metrics.rsi_1d:.1f}`"
-        )
-
-        await bot.send_photo(chat_id=LOG_CHANNEL_ID, photo=photo, caption=log_text, parse_mode="Markdown")
-        await message.answer("✅ У щоденнику!", reply_markup=main_keyboard)
-    except Exception:
-        logging.exception(f"Збій збереження щоденника для {symbol}")
-        await message.answer("❌ Помилка відправки логу в канал.")
-    finally:
-        await wait_msg.delete()
-
 async def check_alerts() -> None:
     try:
-        # --- СИСТЕМА СТЕЖЕННЯ ЗА ВІДКРИТИМИ УГОДАМИ (Paper Trading) ---
-        # Чому спочатку перевіряємо відкриті угоди: балансуючий зворотний зв'язок 
-        # для гарантованої фіксації результату до аналізу нових сетапів.
         open_trades = await get_open_trades()
         for trade in open_trades:
             metrics = await get_market_data(trade['symbol'])
@@ -224,9 +240,7 @@ async def check_alerts() -> None:
                     f"Прибуток/Збиток: `${pnl:.2f}`\n"
                 )
                 await bot.send_message(chat_id=ADMIN_ID, text=report, parse_mode="Markdown")
-        # -------------------------------------------------------------
 
-        # --- СИСТЕМА ПОШУКУ НОВИХ СИГНАЛІВ ---
         for symbol in SWING_WATCHLIST: 
             metrics = await get_market_data(symbol)
             if not metrics.is_valid: 
@@ -269,15 +283,12 @@ async def check_alerts() -> None:
                     
                     await bot.send_message(chat_id=ADMIN_ID, text=f"🤖 **Auto Swing AI ({symbol}):**\n\n{ai_text}", parse_mode="Markdown")
                     
-                    # --- АВТОМАТИЧНА ЕКСТРАКЦІЯ НАМІРІВ ---
-                    # Чому String Matching: уникнення крихкого парсингу JSON з відповідей нейромережі.
                     if "**💡 Свінг-вердикт**: ЛОНГ" in ai_text:
                         await open_trade(symbol, "LONG", metrics.price, risks['long']['sl'], risks['long']['tp'], risks['long']['amount'])
                         await bot.send_message(chat_id=ADMIN_ID, text=f"✅ Віртуальна LONG позиція по {symbol} автоматично відкрита в БД.")
                     elif "**💡 Свінг-вердикт**: ШОРТ" in ai_text:
                         await open_trade(symbol, "SHORT", metrics.price, risks['short']['sl'], risks['short']['tp'], risks['short']['amount'])
                         await bot.send_message(chat_id=ADMIN_ID, text=f"✅ Віртуальна SHORT позиція по {symbol} автоматично відкрита в БД.")
-                    # ----------------------------------------
                     
                     await asyncio.sleep(5)
             
@@ -292,7 +303,7 @@ async def check_alerts() -> None:
 
 async def main():
     await init_state()
-    await init_db() # Гарантуємо наявність таблиць до запуску планувальника
+    await init_db() 
     
     scheduler.add_job(check_alerts, 'interval', minutes=15)
     scheduler.start()
